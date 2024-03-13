@@ -1,0 +1,628 @@
+# Main and supplementary analyses
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r packages}
+# Package names
+packages <-  c("dplyr","tidyr","purrr","lme4")
+
+# Install packages not yet installed
+installed_packages <- packages %in% rownames(installed.packages())
+if (any(installed_packages == FALSE)) {
+    install.packages(packages[!installed_packages])
+}
+
+# Packages loading
+invisible(lapply(packages, library, character.only = TRUE))
+```
+
+```{r functions}
+# Plotting parameters
+myTheme <- function(base_size = 12, base_family = "") 
+{
+  theme_bw(base_size = base_size, base_family = base_family) %+replace% 
+    theme(axis.text = element_text(size = 8, 
+                                   colour = "black"),
+          axis.title = element_text(size = 10, 
+                                    vjust = 1, 
+                                    face = "bold"),
+          legend.text = element_text(size = 8, 
+                                   colour = "black"),
+          legend.title = element_text(size = 10),
+          strip.text = element_text(size = 10,
+                                    margin = margin(0.1,0.1,0.1,0.1, "cm")),
+          strip.background = element_blank(),
+          panel.grid = element_blank())
+}
+
+# Define function to capitalise first letter
+capitalise <- function(string) {
+  substr(string, 1, 1) <- toupper(substr(string, 1, 1))
+  string
+}
+
+# Function to calculate inverse logit
+inv.logit <- function(x) exp(x)/(1 + exp(x))
+
+# Function to calculate critical significance value
+ci.critical <- 
+  function(siglevel) qnorm((100 - siglevel) / 100 / 2, lower.tail = FALSE)
+```
+
+```{r data}
+continent <- 
+  read.csv("data/country/continent_codes.csv") %>% 
+  dplyr::select(Continent_Name, Three_Letter_Country_Code)
+gdp <- read.csv("data/country/GDP.csv") # Available at https://data.worldbank.org/indicator/NY.GDP.MKTP.CD?locations=1W
+country_codes <- readRDS("data/country/country_codes.Rds")
+
+# Main data
+alliucn <- readRDS("data/analysis/main/all_iucn_prepped.Rds")
+
+# Other useful things
+verts <- c("amphibia", "aves", "mammalia")
+matched_threats <- c("threat_habitat_change", "threat_resource_use", "threat_inv_spp" )
+matched_actions <- c("matched_hc", "matched_ru", "matched_is")
+paProps <- c(1,5,10,25,50,75,90,95,99)
+```
+
+```{r sort-data}
+# Spatial endemics -------------------------------------------------------------
+endemic_realm <-
+  alliucn %>% 
+  filter(
+    !(is.na(realms)),
+    !(grepl(";", realms))) %>% 
+  dplyr::select(scientificName, className, realms, actions_zero_sps) %>% 
+  separate_rows(realms, sep = ";") %>% 
+  rename(realm = realms)
+endemic_country <-
+  alliucn %>% 
+  filter(
+    !(is.na(countries_MOL_all)),
+    !(grepl(";", countries_MOL_all))) %>% 
+  dplyr::select(scientificName, className, countries_MOL_all, actions_zero_sps) %>% 
+  separate_rows(countries_MOL_all, sep = ";") %>% 
+  rename(country = countries_MOL_all)
+
+# Sum threatened endemic species by country
+ctry_threatspp <-
+  group_by(endemic_country, country) %>% 
+  summarise(n = n())
+
+# Threat presence/absence ------------------------------------------------------
+alliucn_threats <-
+  gather(alliucn, key = "threat", value = "threat_present", 
+         starts_with("threat_"), -"threat_count") %>% 
+    # Relevel
+    mutate(threat = factor(threat,
+                           levels = c("threat_habitat_change",
+                                      "threat_resource_use", 
+                                      "threat_inv_spp", 
+                                      "threat_pollution",
+                                      "threat_climate_change",
+                                      "threat_other")),
+           className =  factor(className,
+                               levels = sort(unique(className)))) %>% 
+  # Drop NAs
+  filter(!(is.na(threat_present))) %>% 
+  dplyr::select(scientificName, className, iucn, ED, EDGE.Rank,cat_change_bi,
+                threat, threat_present, threat_count, 
+                starts_with("matched_"), 
+                starts_with("action_count_"))
+
+# EDGE -------------------------------------------------------------------------
+alliucn_EDGE <-
+  alliucn %>% 
+  filter(className %in% c("amphibia","aves","mammalia"),
+         !(is.na(ED))) %>%  
+  mutate(EDGE = case_when(is.na(EDGE.Rank) ~ FALSE,
+                          !(is.na(EDGE.Rank)) ~ TRUE),
+         ED = as.numeric(ED)) %>% 
+  dplyr::select(scientificName, className, iucn, EDGE, ED, actions_zero_sps) %>% 
+  # Standardise ED within taxonomic class to make comparable between classes
+  group_by(className) %>% 
+  reframe(ED_max = max(ED),
+            ED_min = min(ED),
+            ED_stand = ED / max(ED),
+            scientificName = scientificName, 
+            iucn = iucn, 
+            EDGE = EDGE, 
+            ED = ED, 
+            actions_zero_sps = actions_zero_sps)
+
+# Matched action presence/absence -----------------------------------------------
+alliucn_matched <- 
+  alliucn_threats %>% 
+  filter(
+    # Threat is present
+    threat_present == 1,
+    # Threat is  habitat change/resource use/invasive species
+    threat %in% matched_threats
+    ) %>% 
+  # Relevel
+  mutate(threat = factor(threat,
+                         levels = c("threat_habitat_change",
+                                    "threat_resource_use",
+                                    "threat_inv_spp"),
+                         labels = c("threat_habitat_change",
+                                    "threat_overexploitation",
+                                    "threat_inv_spp")))
+endemic_country_matched <- 
+  left_join(alliucn_matched, dplyr::select(endemic_country, - className), 
+            by = "scientificName") %>% 
+  filter(!(is.na(country)))
+
+# Status change ----------------------------------------------------------------
+statchange <- readRDS("data/analysis/main/status_change_prepped.Rds")
+statchange_matched <-
+  # Gather threats
+  gather(statchange, key = "threat", value = "threat_present", 
+         starts_with("threat_"), -"threat_count") %>% 
+  filter(
+    # Only considering habitat change/resource use/invasive species
+    threat %in% matched_threats,
+    # Threat is present
+    threat_present == 1,
+    # Only one major threat
+    threat_count <= 1
+    ) %>% 
+  # Relevel
+  mutate(rangeArTot = as.numeric(rangeArTot),
+         LogRangeArea = log(rangeArTot)) %>% 
+  dplyr::select(scientificName, className, familyName, 
+                threat, threat_count, 
+                cat_old_cat, change_reason, cat_change_bi,
+                LogBodyMass, iucn, islandSp_95, 
+                starts_with("matched_action_"), starts_with("action_count_"))
+
+# Sum unknown threats ----------------------------------------------------------
+threat_unknown_count <-
+    colSums(alliucn[,c("threat_habitat_change","threat_resource_use","threat_inv_spp",
+                       "threat_pollution","threat_climate_change","threat_other")], 
+            na.rm = TRUE)
+saveRDS(threat_unknown_count,"data/threat_unknown_count.Rds")
+```
+
+```{r create-dirs}
+# Create output dirs to hold model results
+dir.create("models/main", recursive = TRUE)
+dir.create("models/som")
+```
+
+# Threats
+
+```{r threats}
+# Probability of each action being in place as a function of taxonomic 
+# class and IUCN threat status
+results_threats <- 
+  lapply(levels(alliucn_threats$threat), function(x){
+    mod <- glm(threat_present ~ className * iucn,
+               family = "binomial", 
+               data = filter(alliucn_threats, threat == x))
+    # Significance of interaction
+    mod_noInter <-
+      update(mod, .~. -className:iucn)
+    results_inter <-
+      anova(mod_noInter, 
+            mod, test = "LRT")
+    
+    # Significance of taxonomic Class
+    results_class <- 
+      anova(update(mod_noInter, .~.-className), mod_noInter, test = "LRT")
+    # Significance of IUCN category
+    results_iucn <- 
+      anova(update(mod_noInter, .~.-iucn), mod_noInter, test = "LRT")
+    
+    
+    if(results_inter$`Pr(>Chi)`[2] <= 0.05) {
+      mod <- mod
+    } else{
+      mod <- mod_noInter
+    }
+    
+    return(list(mod = mod, 
+                results_inter = results_inter,
+                results_class = results_class, 
+                results_iucn = results_iucn))
+  })
+names(results_threats)  <- levels(alliucn_threats$threat)
+
+# Retrieve results for each action type
+results_threats_mod <-
+  map(results_threats, pluck, function(x) x$mod)
+results_threats_inter <-
+  map(results_threats, pluck, function(x) x$results_inter)
+results_threats_class <-
+  map(results_threats, pluck, function(x) x$results_class)
+results_threats_iucn <-
+  map(results_threats, pluck, function(x) x$results_iucn)
+
+# Write
+save(results_threats_mod, 
+     results_threats_inter,
+     results_threats_class, 
+     results_threats_iucn,
+     file = "models/main/results_threats.Rdata")
+```
+
+# Zero actions
+
+```{r actionZero-class-iucn}
+# Prob. of zero actions as a function of taxonomic class and IUCN threat status
+actions_zero_props <- names(alliucn)[grep("actions_zero_",names(alliucn))]
+
+results_actionZero <- 
+  lapply(actions_zero_props, function(prop){
+    mod <- glm(alliucn[,prop] ~ className * iucn,
+               family = "binomial", 
+               data = alliucn)
+    # Significance of interaction
+    mod_noInter <-
+      update(mod, .~. -className:iucn)
+    results_inter <-
+      anova(mod_noInter, 
+            mod, test = "LRT")
+    
+    # Significance of taxonomic Class
+    results_class <- 
+      anova(update(mod_noInter, .~.-className), mod_noInter, test = "LRT")
+    # Significance of IUCN category
+    results_iucn <- 
+      anova(update(mod_noInter, .~.-iucn), mod_noInter, test = "LRT")
+    
+    
+    if(results_inter$`Pr(>Chi)`[2] <= 0.05) {
+      mod <- mod
+    } else{
+      mod <- mod_noInter
+    }
+    
+    return(list(prop = prop,
+                mod = mod, 
+                results_inter = results_inter,
+                results_class = results_class, 
+                results_iucn = results_iucn))
+  })
+names(results_actionZero)  <- actions_zero_props
+
+# Retrieve results for each action type
+results_actionZero_mod <-
+  map(results_actionZero, pluck, function(x) x$mod)
+results_actionZero_inter <-
+  map(results_actionZero, pluck, function(x) x$results_inter)
+results_actionZero_class <-
+  map(results_actionZero, pluck, function(x) x$results_class)
+results_actionZero_iucn <-
+  map(results_actionZero, pluck, function(x) x$results_iucn)
+
+# Write
+save(results_actionZero,
+     results_actionZero_mod, 
+     results_actionZero_inter,
+     results_actionZero_class, 
+     results_actionZero_iucn,
+     file = "models/main/results_zero.Rdata")
+```
+
+```{r actionZero-class-iucn-ED}
+# Prob. of zero actions as a function of taxonomic class, IUCN threat status 
+# and standardised ED
+results_actionZero_ED_mod <- 
+  glm(actions_zero_sps ~ className * iucn + ED_stand,
+        family = "binomial", 
+        data = alliucn_EDGE)
+summary(results_actionZero_ED_mod)
+    
+# Significance of interaction
+mod_noInter <- update(results_actionZero_ED_mod, .~. -className:iucn)
+results_actionZero_ED_inter <-
+  anova(mod_noInter, 
+        results_actionZero_ED_mod, 
+        test = "LRT")
+
+# Significance of IUCN
+results_actionZero_iucn_ED <- 
+  anova(update(mod_noInter, .~.-iucn), 
+        mod_noInter, 
+        test = "LRT")
+
+# Significance of ED
+results_actionZero_ED <- 
+  anova(update(mod_noInter, .~.-ED_stand), 
+        mod_noInter, 
+        test = "LRT")
+
+# Write
+save(results_actionZero_ED_mod, 
+     results_actionZero_ED_inter,
+     results_actionZero_iucn_ED,
+     results_actionZero_ED,
+     file = "models/main/results_actionZero_EDGE.Rdata")
+```
+
+```{r actionZero-country}
+# Drop countries with too little data
+actionZero_country_sum <- 
+  group_by(endemic_country, country) %>% 
+  summarise(n = n())
+actionZero_country_todrop <- 
+  unique(actionZero_country_sum$country[actionZero_country_sum$n <= 3])
+endemic_country <- 
+  as.data.frame(endemic_country[!(endemic_country$country %in% actionZero_country_todrop),])
+
+# Stats
+results_actionZero_country_mod <- 
+  glm(actions_zero_sps ~ country,
+      family = "binomial", 
+      data = endemic_country)
+
+# Significance of country
+results_actionZero_country <- 
+  anova(update(results_actionZero_country_mod, .~.-country), 
+        results_actionZero_country_mod, test = "LRT")
+
+# Write
+save(results_actionZero_country_mod,
+     results_actionZero_country,
+     file = "models/main/results_zero_country.Rdata")
+```
+
+```{r probZero-GDP}
+newdat_zero_country <- 
+  expand.grid(country = unique(endemic_country$country)) %>% 
+  left_join(country_codes, by = c("country" = "NAME_0")) %>% 
+  left_join(continent, by = c("GID_0" = "Three_Letter_Country_Code")) %>% 
+  left_join(dplyr::select(gdp, code, gdp), by = c("GID_0" = "code")) %>% 
+  mutate(country = factor(country)) %>% 
+  mutate(country = factor(country, levels = rev(levels(country))),
+         gdp_log = log(gdp)) %>% 
+    # Join threatened endemic species summed by country
+  left_join(ctry_threatspp, by = "country") %>% 
+  filter(!(is.na(gdp)),
+         # New Caledonia & Venezuela have 0 GDP
+         gdp > 0)
+  
+# Predict values for centroids of each realm
+newdat_zero_country[,c("actions_zero_sps", "se")] <- 
+  predict(results_actionZero_country_mod, 
+          newdata = newdat_zero_country, type = "link", se.fit = TRUE)[1:2]
+
+# Back transform
+ci_constant <- ci.critical(95)
+newdat_zero_country$CI_lo <- 
+  newdat_zero_country$actions_zero_sps - (ci_constant * newdat_zero_country$se)
+newdat_zero_country$CI_hi <- 
+  newdat_zero_country$actions_zero_sps + (ci_constant * newdat_zero_country$se)
+newdat_zero_country[,c("actions_zero_sps", "CI_lo", "CI_hi")] <- 
+  inv.logit(newdat_zero_country[,c("actions_zero_sps", "CI_lo", "CI_hi")])
+
+# Model probability of zero actions against GDP & threatened species richness
+probZero_country_mod <-
+  glm(actions_zero_sps ~ n + gdp_log, 
+      family = "quasibinomial", data = newdat_zero_country)
+summary(probZero_country_mod)
+
+# Significance of total threatened species
+probZero_country_n <- 
+  anova(update(probZero_country_mod, .~.-n),probZero_country_mod, test = "LRT")
+probZero_country_gdp <- 
+  anova(update(probZero_country_mod, .~.-gdp_log),probZero_country_mod, test = "LRT")
+
+# Write
+save(newdat_zero_country,
+     probZero_country_mod,
+     probZero_country_n,
+     probZero_country_gdp,
+     file = "models/main/results_zeroProb_country.Rdata")
+saveRDS(newdat_zero_country, "models/main/newdat_zero_country.Rds")
+```
+
+# Matched actions
+
+```{r matched-class-iucn}
+actions_match_props <- names(alliucn)[grep("matched_hc_",names(alliucn))]
+
+results_match <- 
+  lapply(levels(alliucn_matched$threat), function(threat_i){
+    # If threat is not habitat change, don't need to iterate over PA thresholds
+    if(threat_i != "threat_habitat_change"){
+      action_i <- ifelse(threat_i == "threat_inv_spp", "matched_is", "matched_ru")
+      
+      # Drop classes with too little data
+      sub_df <- filter(alliucn_matched, 
+                       threat == threat_i)
+      sum_df <- 
+          group_by(sub_df, className, iucn) %>% 
+          # Count number of species with non NA value for matched action
+          summarise(matched_notNA = length(which(!(is.na(!!sym(action_i)))))) %>% 
+          ungroup() %>% 
+          complete(className,
+                   iucn,
+                   fill = list(matched_notNA = 0)) %>% 
+          group_by(className) %>% 
+          # Keep only if > 3 records for every RL category
+          summarise(keep = all(matched_notNA > 3))
+      tokeep <- sum_df$className[sum_df$keep]
+      sub_df <- sub_df[sub_df$className %in% tokeep,]
+      
+      # Model
+      mod <- glm(sub_df[,action_i] ~ className * iucn,
+                 family = "binomial", 
+                 data = sub_df)
+      # Significance of interaction
+      mod_noInter <-
+        update(mod, .~. -className:iucn)
+      results_inter <-
+        anova(mod_noInter, 
+              mod, test = "LRT")
+      
+      # Significance of taxonomic Class
+      results_class <- 
+        anova(update(mod_noInter, .~.-className), mod_noInter, test = "LRT")
+      # Significance of IUCN category
+      results_iucn <- 
+        anova(update(mod_noInter, .~.-iucn), mod_noInter, test = "LRT")
+      
+      
+      if(results_inter$`Pr(>Chi)`[2] <= 0.05) {
+        mod <- mod
+      } else{
+        mod <- mod_noInter
+      }
+      mod$classes <- tokeep
+      
+      return(list(action = action_i,
+                  threat = threat_i,
+                  mod = mod, 
+                  results_inter = results_inter,
+                  results_class = results_class, 
+                  results_iucn = results_iucn))
+    }
+    
+    # If threat is habitat change, iterate over PA thresholds
+    else {
+      lapply(actions_match_props, function(prop_i){
+        # Drop classes with too little data
+        sub_df <- filter(alliucn_matched, 
+                         threat == threat_i)
+        sum_df <- 
+            group_by(sub_df, className, iucn) %>% 
+            # Count number of species with non NA value for matched action
+            summarise(matched_notNA = length(which(!(is.na(!!sym(prop_i)))))) %>% 
+            ungroup() %>% 
+            complete(className,
+                     iucn,
+                     fill = list(matched_notNA = 0)) %>% 
+            group_by(className) %>% 
+            # Keep only if > 3 records for every RL category
+            summarise(keep = all(matched_notNA > 3))
+        tokeep <- sum_df$className[sum_df$keep]
+        sub_df <- sub_df[sub_df$className %in% tokeep,]
+        
+        mod <- glm(sub_df[,prop_i] ~ className * iucn,
+                   family = "binomial", 
+                   data = sub_df)
+        
+        # Significance of interaction
+        mod_noInter <-
+          update(mod, .~. -className:iucn)
+        results_inter <-
+          anova(mod_noInter, 
+                mod, test = "LRT")
+        
+        # Significance of taxonomic Class
+        results_class <- 
+          anova(update(mod_noInter, .~.-className), mod_noInter, test = "LRT")
+        # Significance of IUCN category
+        results_iucn <- 
+          anova(update(mod_noInter, .~.-iucn), mod_noInter, test = "LRT")
+        
+        if(results_inter$`Pr(>Chi)`[2] <= 0.05) {
+          mod <- mod
+        } else{
+          mod <- mod_noInter
+        }
+        mod$classes <- tokeep
+        
+        return(list(action = prop_i,
+                    threat = threat_i,
+                    mod = mod, 
+                    results_inter = results_inter,
+                    results_class = results_class, 
+                    results_iucn = results_iucn))
+      })
+    }
+  })
+names(results_match)  <- levels(alliucn_matched$threat)
+names(results_match$threat_habitat_change) <- actions_match_props
+results_match_hc <- results_match$threat_habitat_change
+results_match$threat_habitat_change <- results_match_hc$matched_hc_sps
+
+# Retrieve results for each action type
+results_match_mod <-
+  map(results_match, pluck, function(x) x$mod)
+results_match_inter <-
+  map(results_match, pluck, function(x) x$results_inter)
+results_match_class <-
+  map(results_match, pluck, function(x) x$results_class)
+results_match_iucn <-
+  map(results_match, pluck, function(x) x$results_iucn)
+
+# Write
+save(results_match,
+     results_match_hc,
+     results_match_mod, 
+     results_match_inter,
+     results_match_class, 
+     results_match_iucn,
+     file = "models/main/results_match.Rdata")
+```
+
+```{r matched-country}
+results_match_country <- 
+  lapply(levels(endemic_country_matched$threat), function(threat_i){
+    # Define action
+    action_i <- 
+      ifelse(threat_i == "threat_habitat_change", "matched_hc_sps",
+             ifelse(threat_i == "threat_inv_spp", "matched_is", "matched_ru"))
+    
+    # Drop classes with too little data
+    sub_df <- filter(endemic_country_matched, 
+                     threat == threat_i)
+    sum_df <- 
+        group_by(sub_df, className, iucn) %>% 
+        # Count number of species with non NA value for matched action
+        summarise(matched_notNA = length(which(!(is.na(!!sym(action_i)))))) %>% 
+        ungroup() %>% 
+        complete(className,
+                 iucn,
+                 fill = list(matched_notNA = 0)) %>% 
+        group_by(className) %>% 
+        # Keep only if > 3 records for every RL category
+        summarise(keep = all(matched_notNA > 3))
+    tokeep <- sum_df$className[sum_df$keep]
+    sub_df <- sub_df[sub_df$className %in% tokeep,]
+      
+    # Model
+    mod <- glm(sub_df[,action_i] ~ country,
+               family = "binomial", 
+               data = sub_df)
+    
+    # Significance of IUCN category
+    results_country <- 
+      anova(update(mod, .~.-country), mod, test = "LRT")
+    
+    return(list(action = action_i,
+                threat = threat_i,
+                mod = mod, 
+                results_country = results_country))
+  })
+names(results_match_country)  <- levels(endemic_country_matched$threat)
+
+# Retrieve results for each action type
+results_match_country_mod <-
+  map(results_match_country, pluck, function(x) x$mod)
+results_match_country <-
+  map(results_match_country, pluck, function(x) x$results_country)
+
+# Write
+save(results_match_country_mod,
+     results_match_country,
+     file = "models/main/results_match_country.Rdata")
+```
+
+# EDGE species
+
+```{r zero-actions}
+# Very similar prop EDGE vs. not EDGE for neglected vs. not neglected species
+zero_EDGE <- 
+  alliucn %>% 
+  filter(className %in% c("amphibia", "aves", "mammalia"),
+         actions_zero_sps,
+         !(is.na(EDGE.Rank))) %>% 
+  arrange(className, scientificName)
+write.csv(zero_EDGE,"data/analysis/main/zero_EDGE.csv", row.names = FALSE)
+```

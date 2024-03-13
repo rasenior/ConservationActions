@@ -1,0 +1,492 @@
+# Prepare dataset for analyses
+
+Final tweaks and reformatting to create minimalist dataframe for analyses.
+
+## Code
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r other-setup}
+# Package names
+packages <- c("dplyr","tidyr","purrr")
+
+# Install packages not yet installed
+installed_packages <- packages %in% rownames(installed.packages())
+if (any(installed_packages == FALSE)) {
+    install.packages(packages[!installed_packages])
+}
+
+# Packages loading
+invisible(lapply(packages, library, character.only = TRUE))
+
+#################################################
+# Function to determine threats
+#################################################
+# Limit to threats with scope: Majority (50-90%)|Whole (>90%)
+# Severity: Very rapid declines|Rapid declines|Slow, significant declines
+# Timing: Ongoing|Past, likely to return|Past, unlikely to return
+
+# Read in reclass .csv
+threat_codes <-  
+    read.csv("data/threat_reclass_strict.csv", stringsAsFactors = FALSE) %>% 
+    dplyr::select(-notes) %>% 
+    gather(key = "threat", value = "val",6:11) %>% 
+    filter(val) %>% 
+    dplyr::select(-val) %>% 
+    arrange(threat_code_l1,threat_code_l2,threat_code_l3)
+
+get_threat <- function(r, scope, severity, timing){
+    threats <- unlist(strsplit(as.character(r["threat_code"]), ";"))
+    stresses_eco <- unlist(strsplit(as.character(r["threat_stress_eco"]), ";"))
+    scope <-  
+        which(tolower(unlist(strsplit(as.character(r["threat_scope"]), ";"))) %in% scope)
+    severity <- 
+        which(tolower(unlist(strsplit(as.character(r["threat_severity"]), ";"))) %in% severity)
+    timing <- 
+        which(tolower(unlist(strsplit(as.character(r["threat_timing"]), ";"))) %in% timing)
+    
+    if (length(scope) == 0 | length(severity) == 0 | length(timing) == 0) return(NA)
+    
+    # Identify which threats are matched in all of scope, severity and timing
+    good_i <- which(1:length(threats) %in% scope & 
+                        1:length(threats) %in% severity & 
+                        1:length(threats) %in% timing)
+    # If no index matches in all of scope, severity and timing, return NA
+    if(length(good_i) == 0) return(NA)
+    threats <- threats[good_i]
+    stresses_eco <- stresses_eco[good_i]
+    
+    #####################################
+    # Reclassify
+    #####################################
+    # 1. Residential & commercial development
+    # 2. Agriculture & aquaculture
+    # 3. Energy production & mining
+    # 4. Transportation & service corridors
+    # 5. Biological resource use  
+    #     
+    # In some case where species is not the target or the effect is unintentional,
+    # code as habitat degradation instead: 5.3.3, 5.3.4, 5.4.3, 5.4.4
+    #
+    # 6. Human intrusions & disturbance
+    # 7. Natural system modifications
+    # 8. Invasive and other problematic species, genes & diseases
+    #     (includes native problematic species/diseases [8.2], problematic 
+    #     species/diseas of unknown origin [8.4], viral/prion diseases [8.5] &
+    #     dieases of unknown cause [8.6])
+    # 9. Pollution
+    # 10. Geological events
+    # 11. Climate change & severe weather
+    # 12. Other options
+    
+    # Reclassify
+    threats <- sapply(1:length(good_i), function(i){
+        threat <- threats[i]
+        stress_eco <- stresses_eco[i]
+        threat_new <- threat_codes[threat_codes[,"threat_code"] == threat, "threat"]
+        
+        # If new threat category is 'habitat change', must also satisfy criteria of
+        # causing ecosystem stress rather than species stress only
+        if(threat_new == "habitat_change") {
+            if(stress_eco) {
+                return(threat_new)
+            } else {
+                return("other")
+            }
+        } else {
+            return(threat_new)
+        }
+        
+    })
+    
+    # Drop category 10 (not anthropogenic) and 12 (not informative)
+    threats <- threats[threats != 10 & threats != 12]
+    if (length(threats) == 0) return(NA)
+    
+    threats <- factor(threats,
+                      levels = c("habitat_change", "resource_use", "inv_spp",
+                                 "pollution","climate_change", "other"))
+    
+    # Also useful to return which categories of threat apply
+    results <-
+        data.frame(threats = paste(threats, collapse = ";"),
+                   threat_habitat_change = 
+                       ifelse("habitat_change" %in% threats, TRUE, FALSE),
+                   threat_resource_use = 
+                       ifelse("resource_use" %in% threats, TRUE, FALSE),
+                   threat_inv_spp = 
+                       ifelse("inv_spp" %in% threats, TRUE, FALSE),
+                   threat_pollution = 
+                       ifelse("pollution" %in% threats, TRUE, FALSE),
+                   threat_climate_change = 
+                       ifelse("climate_change" %in% threats, TRUE, FALSE),
+                   threat_other = 
+                       ifelse("other" %in% threats, TRUE, FALSE))
+    
+    return(results)
+}
+gsubGeo <- function(x){gsub(", ",";",gsub("[]]","",gsub("[[]","",x)))}
+```
+
+```{r load-data}
+load("data/all_iucn_dat.Rdata")
+```
+
+```{r recode}
+all_iucn <- 
+    all_iucn %>% 
+    # Order by taxon ID and year
+    arrange(internalTaxonId, yearPublished) %>% 
+    filter(
+        # Terrestrial or terrestrial & freshwater only
+        (systems == "Terrestrial" | systems == "Terrestrial|Freshwater (=Inland waters)"),
+        # Threatened species only
+        redlistCategory %in% c("Critically Endangered", "Endangered" , "Vulnerable")
+    ) %>% 
+    # Replace any unknown values with NA
+    mutate(
+    across(everything() & where(is.character), ~ na_if(.x, "Unknown")),
+    across(everything() & where(is.character), ~ na_if(.x, "Not Applicable")),
+    ) %>% 
+    mutate(
+        realms = gsubGeo(realms),
+        countries = gsubGeo(countries),
+        countries_MOL_expert = gsubGeo(countries_MOL_expert),
+        countries_MOL_refine = gsubGeo(countries_MOL_refine),
+        countries_MOL_all = gsubGeo(countries_MOL_all),
+        # Make elevation numeric
+        ElevationUpper.limit = as.numeric(ElevationUpper.limit),
+        # Log body mass
+        LogBodyMass = log(as.numeric(BodyMass)),
+        # Relevel Red List Category
+        iucn_cat = factor(redlistCategory,
+                          levels = c("Least Concern","Near Threatened",
+                                     "Vulnerable", "Endangered", "Critically Endangered", 
+                                     "Extinct")),
+        # Make numeric Red List Category
+        iucn = as.numeric(factor(iucn_cat,
+                                 levels = c("Least Concern","Near Threatened",
+                                            "Vulnerable", "Endangered", 
+                                            "Critically Endangered", "Extinct")),
+                          labels = 1:6),
+        # Relevel old Red List Category
+        cat_old_cat = factor(cat_old_cat,
+                             levels = c("LC","NT","VU", "EN", "CR","EX"),
+                             labels = c("Least Concern","Near Threatened",
+                                        "Vulnerable", "Endangered", "Critically Endangered", 
+                                        "Extinct")),
+        # Possibly extinct in the wild?
+        possiblyExtinct = case_when(grepl("true", 
+                                          possiblyExtinct) ~ 1, 
+                                    TRUE ~ 0),
+        # Possibly extinct in the wild?
+        possiblyExtinctInTheWild = case_when(grepl("true", 
+                                                   possiblyExtinctInTheWild) ~ 1, 
+                                             TRUE ~ 0),
+        # Any international trade?
+        trade_international_bi = case_when(grepl("true", 
+                                                 trade_international) ~ 1, 
+                                           TRUE ~ 0),
+        trade_national_bi = case_when((grepl("true", trade_national) |
+                                           grepl("true", trade_subsistence)) ~ 1, 
+                                      TRUE ~ 0),
+        # Coerce characters/factors to numeric
+        populationTrend = case_when(populationTrend == "Decreasing" ~ 0,
+                                    populationTrend  %in% c("Increasing", "Stable") ~ 1),
+        cat_change_bi = case_when(cat_change_bi == "decline" ~ 0,
+                                  cat_change_bi == "improve" ~ 1)) %>% 
+    # Exclude possibly extinct
+    filter(possiblyExtinctInTheWild == 0)
+
+# Coerce logical variables to logical and then numeric
+logi <- c("TRUE", "FALSE", NA)
+logivar <- sapply(names(all_iucn), function(i) all(unique(all_iucn[,i]) %in% logi))
+logivar <- names(logivar)[which(logivar)]
+all_iucn[,logivar] <- apply(all_iucn[,logivar], 2, as.logical)
+all_iucn[,logivar] <- apply(all_iucn[,logivar], 2, as.numeric)
+
+# Recode threats
+threats <- 
+    apply(all_iucn, MARGIN = 1, get_threat,
+          scope = tolower(c(
+              # "Minority (<50%)", 
+              "Majority (50-90%)", 
+              "Whole (>90%)", 
+              "Unknown"
+              # "NA"
+          )),
+          severity = tolower(c(
+              # "No decline", 
+              # "Negligible declines", 
+              "Slow, Significant Declines", 
+              "Rapid Declines", 
+              "Very Rapid Declines",
+              # "Causing/Could cause fluctuations",
+              "Unknown"
+              # "NA"
+          )),
+          timing = tolower(c(
+              "Past, Unlikely to Return",
+              "Past, Likely to Return",
+              "Ongoing"
+              # "Future",
+              # "Unknown",
+              # "NA"
+          ))) %>% 
+    do.call("rbind", .) %>% 
+    dplyr::select(-"threats")
+```
+
+```{r threat-action}
+# Format threat & action variables 
+all_iucn <-  
+    cbind(all_iucn, threats) %>% 
+    mutate(
+        threat_habitat_change = as.numeric(threat_habitat_change),
+        # Update resource use to only intentional AND international trade
+        threat_resource_use = 
+            case_when(threat_resource_use & trade_international_bi ~ 1,
+                      !(threat_resource_use & trade_international_bi) ~ 0),
+        threat_inv_spp = as.numeric(threat_inv_spp),
+        threat_pollution = as.numeric(threat_pollution),
+        threat_climate_change = as.numeric(threat_climate_change),
+        threat_other = as.numeric(threat_other),
+        trade_international_bi = as.numeric(trade_international_bi)
+    ) %>%
+    # Matched action = 1 if threat present & action present
+    # Matched action = 0 if threat present & action absent
+    # Matched action = NA if threat absent or NA, or action NA (e.g. missing AOH)
+    mutate(
+        # If IUCN state trade ctrl, or on CITES
+        matched_ru = 
+            case_when(threat_resource_use == 1 & trade_ctrl == 1 ~ 1,
+                      threat_resource_use == 1 & trade_ctrl == 0 ~ 0),
+        # If IUCN state in inv ctrl, manual states inv ctrl, or successful eradication efforts
+        matched_is = 
+            case_when(threat_inv_spp == 1 & invasive_ctrl_success == 1 ~ 1,
+                      threat_inv_spp == 1 & invasive_ctrl_success == 0 ~ 0),
+        # If SPS = 100
+        matched_hc_sps = 
+            case_when(threat_habitat_change == 1 & inPA_SPS == 1 ~ 1,
+                      threat_habitat_change == 1 & inPA_SPS == 0 ~ 0),
+        # If PA prop > target
+        matched_hc_target = 
+            case_when(threat_habitat_change == 1 & inPA_target == 1 ~ 1,
+                      threat_habitat_change == 1 & inPA_target == 0 ~ 0),
+        # If IUCN state in PA, manual states in PA, GBIF states in PA, or PA prop > target
+        matched_hc_targetRL = 
+            case_when(threat_habitat_change == 1 & inPA_targetRL == 1 ~ 1,
+                      threat_habitat_change == 1 & inPA_targetRL == 0 ~ 0),
+        # If IUCN state in PA, manual states in PA, GBIF states in PA, or PA prop > 1%
+        matched_hc_1 = 
+            case_when(threat_habitat_change == 1 & inPA_prop1 == 1 ~ 1,
+                      threat_habitat_change == 1 & inPA_prop1 == 0 ~ 0),
+        # If IUCN state in PA, manual states in PA, GBIF states in PA, or PA prop > 5%
+        matched_hc_5 = 
+            case_when(threat_habitat_change == 1 & inPA_prop5 == 1 ~ 1,
+                      threat_habitat_change == 1 & inPA_prop5 == 0 ~ 0),
+        # If IUCN state in PA, manual states in PA, GBIF states in PA, or PA prop > 10%
+        matched_hc_10 = 
+            case_when(threat_habitat_change == 1 & inPA_prop10 == 1 ~ 1,
+                      threat_habitat_change == 1 & inPA_prop10 == 0 ~ 0),
+        # If IUCN state in PA, manual states in PA, GBIF states in PA, or PA prop > 25%
+        matched_hc_25 = 
+            case_when(threat_habitat_change == 1 & inPA_prop25 == 1 ~ 1,
+                      threat_habitat_change == 1 & inPA_prop25 == 0 ~ 0),
+        # If IUCN state in PA, manual states in PA, GBIF states in PA, or PA prop > 50%
+        matched_hc_50 = 
+            case_when(threat_habitat_change == 1 & inPA_prop50 == 1 ~ 1,
+                      threat_habitat_change == 1 & inPA_prop50 == 0 ~ 0),
+        # If IUCN state in PA, manual states in PA, GBIF states in PA, or PA prop > 75%
+        matched_hc_75 = 
+            case_when(threat_habitat_change == 1 & inPA_prop75 == 1 ~ 1,
+                      threat_habitat_change == 1 & inPA_prop75 == 0 ~ 0),
+        # If IUCN state in PA, manual states in PA, GBIF states in PA, or PA prop > 90%
+        matched_hc_90 = 
+            case_when(threat_habitat_change == 1 & inPA_prop90 == 1 ~ 1,
+                      threat_habitat_change == 1 & inPA_prop90 == 0 ~ 0),
+        # If IUCN state in PA, manual states in PA, GBIF states in PA, or PA prop > 95%
+        matched_hc_95 = 
+            case_when(threat_habitat_change == 1 & inPA_prop95 == 1 ~ 1,
+                      threat_habitat_change == 1 & inPA_prop95 == 0 ~ 0),
+        # If IUCN state in PA, manual states in PA, GBIF states in PA, or PA prop > 99%
+        matched_hc_99 = 
+            case_when(threat_habitat_change == 1 & inPA_prop99 == 1 ~ 1,
+                      threat_habitat_change == 1 & inPA_prop99 == 0 ~ 0)
+    )
+```
+
+```{r summarise}
+# Summarise threats and actions
+all_iucn_sum <-
+    summarise(group_by(all_iucn, internalTaxonId, className),
+              areaAOH = areaAOH,
+              threat_count = sum(threat_habitat_change,
+                                 threat_resource_use,
+                                 threat_inv_spp,
+                                 threat_pollution,
+                                 threat_climate_change,
+                                 threat_other,
+                                 na.rm = TRUE),
+              # Count actions depending on definition of in PA
+              action_count_sps = sum(inPA_SPS,
+                                     invasive_ctrl_success,
+                                     education,
+                                     legislation,
+                                     reintroduction),
+              action_count_target = sum(inPA_target,
+                                        invasive_ctrl_success,
+                                        education,
+                                        legislation,
+                                        reintroduction,
+                                        na.rm = TRUE),
+              action_count_targetRL = sum(inPA_targetRL,
+                                          invasive_ctrl_success,
+                                          education,
+                                          legislation,
+                                          reintroduction),
+              action_count_prop1 = sum(inPA_prop1,
+                                       invasive_ctrl_success,
+                                       education,
+                                       legislation,
+                                       reintroduction),
+              action_count_prop5 = sum(inPA_prop5,
+                                       invasive_ctrl_success,
+                                       education,
+                                       legislation,
+                                       reintroduction),
+              action_count_prop10 = sum(inPA_prop10,
+                                        invasive_ctrl_success,
+                                        education,
+                                        legislation,
+                                        reintroduction),
+              action_count_prop25 = sum(inPA_prop25,
+                                        invasive_ctrl_success,
+                                        education,
+                                        legislation,
+                                        reintroduction),
+              action_count_prop50 = sum(inPA_prop50,
+                                        invasive_ctrl_success,
+                                        education,
+                                        legislation,
+                                        reintroduction),
+              action_count_prop75 = sum(inPA_prop75,
+                                        invasive_ctrl_success,
+                                        education,
+                                        legislation,
+                                        reintroduction),
+              action_count_prop90 = sum(inPA_prop90,
+                                        invasive_ctrl_success,
+                                        education,
+                                        legislation,
+                                        reintroduction),
+              action_count_prop95 = sum(inPA_prop95,
+                                        invasive_ctrl_success,
+                                        education,
+                                        legislation,
+                                        reintroduction),
+              action_count_prop99 = sum(inPA_prop99,
+                                        invasive_ctrl_success,
+                                        education,
+                                        legislation,
+                                        reintroduction))
+```
+
+# Finalise dataframe
+
+```{r minimial-df}
+pvars <- c("threat_habitat_change", "threat_resource_use",
+           "threat_inv_spp", "threat_pollution", 
+           "threat_climate_change", "threat_other",
+           "invasive_ctrl_success",
+           "education", 
+           "reintroduction",
+           "legislation",
+           "trade_ctrl",
+           "exsitu",
+           "sps_refine", "sps_expert", "sps_combi",
+           "possiblyExtinctInTheWild","possiblyExtinct",
+           "rangeArTot", "rangeArTotPA", "rangePA_prop", 
+           "areaAOH", "areaAOHinPA", "aohPA_prop",
+           "conservationActions",
+           "realms", "countries",
+           "countries_MOL_expert", "countries_MOL_refine", "countries_MOL_all", 
+           "islandSp_95", "ED", "EDGE.Rank",
+           "LogBodyMass", "iucn_cat", "iucn",
+           "cat_old_cat", "change_reason", "cat_change_bi",
+           "matched_ru", "matched_is")
+
+# Create smaller df for analyses
+all_iucn <- 
+    left_join(all_iucn, 
+              dplyr::select(all_iucn_sum, -className, -areaAOH), 
+              "internalTaxonId") %>% 
+    dplyr::select(internalTaxonId,
+                  scientificName,
+                  familyName,
+                  orderName,
+                  className,
+                  phylumName,
+                  populationTrend,
+                  threat_count,
+                  starts_with("inPA_"),
+                  starts_with("action_count_"),
+                  all_of(pvars),
+                  starts_with("matched_hc"),
+                  starts_with("matched_action")) %>% 
+    mutate(scientificName = gsub(" ", "_",scientificName),
+           genus = gsub("_.*", "", scientificName),
+           actions_zero_sps = case_when(action_count_sps == 0 ~ TRUE,
+                                           action_count_sps != 0 ~ FALSE),
+           actions_zero_target = case_when(action_count_target == 0 ~ TRUE,
+                                           action_count_target != 0 ~ FALSE),
+           actions_zero_targetRL = case_when(action_count_targetRL == 0 ~ TRUE,
+                                             action_count_targetRL != 0 ~ FALSE),
+           actions_zero_prop1 = case_when(action_count_prop1 == 0 ~ TRUE,
+                                          action_count_prop1 != 0 ~ FALSE),
+           actions_zero_prop5 = case_when(action_count_prop5 == 0 ~ TRUE,
+                                          action_count_prop5 != 0 ~ FALSE),
+           actions_zero_prop10 = case_when(action_count_prop10 == 0 ~ TRUE,
+                                           action_count_prop10 != 0 ~ FALSE),
+           actions_zero_prop25 = case_when(action_count_prop25 == 0 ~ TRUE,
+                                           action_count_prop25 != 0 ~ FALSE),
+           actions_zero_prop50 = case_when(action_count_prop50 == 0 ~ TRUE,
+                                           action_count_prop50 != 0 ~ FALSE),
+           actions_zero_prop75 = case_when(action_count_prop75 == 0 ~ TRUE,
+                                           action_count_prop75 != 0 ~ FALSE),
+           actions_zero_prop90 = case_when(action_count_prop90 == 0 ~ TRUE,
+                                           action_count_prop90 != 0 ~ FALSE),
+           actions_zero_prop95 = case_when(action_count_prop95 == 0 ~ TRUE,
+                                           action_count_prop95 != 0 ~ FALSE),
+           actions_zero_prop99 = case_when(action_count_prop99 == 0 ~ TRUE,
+                                           action_count_prop99 != 0 ~ FALSE))
+
+# Check NA where action_count is NA
+table(all_iucn$actions_zero_sps)
+unique(all_iucn$actions_zero_sps[is.na(all_iucn$action_count_sps)])
+# NA
+
+# Create status change dataframe
+status_change <- 
+    all_iucn %>%
+    filter(
+        # Species genuinely changing status
+        !(is.na(cat_change_bi)),
+        !(is.na(cat_old_cat)),
+        change_reason == "G",
+        # Not changing from LC
+        cat_old_cat != "Least Concern"
+    ) 
+
+# Create pop trends dataframe
+poptrends <-
+    all_iucn %>% 
+    filter(
+        # Species improving or declining in populations trend
+        populationTrend %in% 0:1,
+        # Threatened species only
+        iucn_cat %in% c("Critically Endangered", "Endangered" , "Vulnerable")
+    )
+```

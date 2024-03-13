@@ -1,0 +1,270 @@
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r packages}
+# Package names
+packages <-  c("dplyr","tidyr","purrr","lme4")
+
+# Install packages not yet installed
+installed_packages <- packages %in% rownames(installed.packages())
+if (any(installed_packages == FALSE)) {
+    install.packages(packages[!installed_packages])
+}
+
+# Packages loading
+invisible(lapply(packages, library, character.only = TRUE))
+```
+
+```{r data}
+# Main data
+alliucn_excPE <- readRDS("data/analysis/som/all_iucn_prepped_excPE.Rds")
+
+# Other useful things
+verts <- c("amphibia", "aves", "mammalia")
+matched_threats <- c("threat_habitat_change", "threat_resource_use", "threat_inv_spp" )
+matched_actions <- c("matched_hc", "matched_ru", "matched_is")
+paProps <- c(1,5,10,25,50,75,90,95,99)
+```
+
+```{r sort-data}
+# Threat presence/absence ------------------------------------------------------
+alliucn_threats <-
+    alliucn_excPE %>% 
+  gather(key = "threat", value = "threat_present", 
+         starts_with("threat_"), -"threat_count") %>% 
+    # Relevel
+    mutate(threat = factor(threat,
+                           levels = c("threat_habitat_change",
+                                      "threat_resource_use", 
+                                      "threat_inv_spp", 
+                                      "threat_pollution",
+                                      "threat_climate_change",
+                                      "threat_other")),
+           className =  factor(className,
+                               levels = sort(unique(className)))) %>% 
+  # Drop NAs
+  filter(!(is.na(threat_present))) %>% 
+  dplyr::select(scientificName, className, iucn, cat_change_bi,
+                threat, threat_present, threat_count, 
+                starts_with("matched_"), 
+                starts_with("action_count_"))
+
+# Matched action presence/absence -----------------------------------------------
+alliucn_matched <- 
+  alliucn_threats %>% 
+  filter(
+    # Threat is present
+    threat_present == 1,
+    # Threat is  habitat change/resource use/invasive species
+    threat %in% matched_threats
+    ) %>% 
+  # Relevel
+  mutate(threat = factor(threat,
+                         levels = c("threat_habitat_change",
+                                    "threat_resource_use",
+                                    "threat_inv_spp"),
+                         labels = c("threat_habitat_change",
+                                    "threat_overexploitation",
+                                    "threat_inv_spp")))
+```
+
+# Exclude possibly extinct
+
+```{r matched-class-iucn}
+actions_match_props <- names(alliucn_excPE)[grep("matched_hc_",names(alliucn_excPE))]
+
+results_excPE_match <- 
+  lapply(levels(alliucn_matched$threat), function(threat_i){
+    # If threat is not habitat change, don't need to iterate over PA thresholds
+    if(threat_i != "threat_habitat_change"){
+      action_i <- ifelse(threat_i == "threat_inv_spp", "matched_is", "matched_ru")
+      
+      # Drop classes with too little data
+      sub_df <- filter(alliucn_matched, 
+                       threat == threat_i)
+      sum_df <- 
+          group_by(sub_df, className, iucn) %>% 
+          # Count number of species with non NA value for matched action
+          summarise(matched_notNA = length(which(!(is.na(!!sym(action_i)))))) %>% 
+          ungroup() %>% 
+          complete(className,
+                   iucn,
+                   fill = list(matched_notNA = 0)) %>% 
+          group_by(className) %>% 
+          # Keep only if > 3 records for every RL category
+          summarise(keep = all(matched_notNA > 3))
+      tokeep <- sum_df$className[sum_df$keep]
+      sub_df <- sub_df[sub_df$className %in% tokeep,]
+      
+      # Model
+      mod <- glm(sub_df[,action_i] ~ className * iucn,
+                 family = "binomial", 
+                 data = sub_df)
+      # Significance of interaction
+      mod_noInter <-
+        update(mod, .~. -className:iucn)
+      results_excPE_inter <-
+        anova(mod_noInter, 
+              mod, test = "LRT")
+      
+      # Significance of taxonomic Class
+      results_excPE_class <- 
+        anova(update(mod_noInter, .~.-className), mod_noInter, test = "LRT")
+      # Significance of IUCN category
+      results_excPE_iucn <- 
+        anova(update(mod_noInter, .~.-iucn), mod_noInter, test = "LRT")
+      
+      
+      if(results_excPE_inter$`Pr(>Chi)`[2] <= 0.05) {
+        mod <- mod
+      } else{
+        mod <- mod_noInter
+      }
+      mod$classes <- tokeep
+      
+      return(list(action = action_i,
+                  threat = threat_i,
+                  mod = mod, 
+                  results_excPE_inter = results_excPE_inter,
+                  results_excPE_class = results_excPE_class, 
+                  results_excPE_iucn = results_excPE_iucn))
+    }
+    
+    # If threat is habitat change, iterate over PA thresholds
+    else {
+      lapply(actions_match_props, function(prop_i){
+        # Drop classes with too little data
+        sub_df <- filter(alliucn_matched, 
+                         threat == threat_i)
+        sum_df <- 
+            group_by(sub_df, className, iucn) %>% 
+            # Count number of species with non NA value for matched action
+            summarise(matched_notNA = length(which(!(is.na(!!sym(prop_i)))))) %>% 
+            ungroup() %>% 
+            complete(className,
+                     iucn,
+                     fill = list(matched_notNA = 0)) %>% 
+            group_by(className) %>% 
+            # Keep only if > 3 records for every RL category
+            summarise(keep = all(matched_notNA > 3))
+        tokeep <- sum_df$className[sum_df$keep]
+        sub_df <- sub_df[sub_df$className %in% tokeep,]
+        
+        mod <- glm(sub_df[,prop_i] ~ className * iucn,
+                   family = "binomial", 
+                   data = sub_df)
+        
+        # Significance of interaction
+        mod_noInter <-
+          update(mod, .~. -className:iucn)
+        results_excPE_inter <-
+          anova(mod_noInter, 
+                mod, test = "LRT")
+        
+        # Significance of taxonomic Class
+        results_excPE_class <- 
+          anova(update(mod_noInter, .~.-className), mod_noInter, test = "LRT")
+        # Significance of IUCN category
+        results_excPE_iucn <- 
+          anova(update(mod_noInter, .~.-iucn), mod_noInter, test = "LRT")
+        
+        if(results_excPE_inter$`Pr(>Chi)`[2] <= 0.05) {
+          mod <- mod
+        } else{
+          mod <- mod_noInter
+        }
+        mod$classes <- tokeep
+        
+        return(list(action = prop_i,
+                    threat = threat_i,
+                    mod = mod, 
+                    results_excPE_inter = results_excPE_inter,
+                    results_excPE_class = results_excPE_class, 
+                    results_excPE_iucn = results_excPE_iucn))
+      })
+    }
+  })
+names(results_excPE_match)  <- levels(alliucn_matched$threat)
+names(results_excPE_match$threat_habitat_change) <- actions_match_props
+results_excPE_match_hc <- results_excPE_match$threat_habitat_change
+results_excPE_match$threat_habitat_change <- results_excPE_match_hc$matched_hc_sps
+
+# Retrieve results for each action type
+results_excPE_match_mod <-
+  map(results_excPE_match, pluck, function(x) x$mod)
+results_excPE_match_inter <-
+  map(results_excPE_match, pluck, function(x) x$results_excPE_inter)
+results_excPE_match_class <-
+  map(results_excPE_match, pluck, function(x) x$results_excPE_class)
+results_excPE_match_iucn <-
+  map(results_excPE_match, pluck, function(x) x$results_excPE_iucn)
+
+# Write
+save(results_excPE_match,
+     results_excPE_match_hc,
+     results_excPE_match_mod, 
+     results_excPE_match_inter,
+     results_excPE_match_class, 
+     results_excPE_match_iucn,
+     file = "models/som/results_excPE_match.Rdata")
+```
+
+```{r actionZero-class-iucn}
+# Prob. of zero actions as a function of taxonomic class and IUCN threat status
+actions_zero_props <- names(alliucn_excPE)[grep("actions_zero_",names(alliucn_excPE))]
+
+results_excPE_actionZero <- 
+  lapply(actions_zero_props, function(prop){
+    mod <- glm(alliucn_excPE[,prop] ~ className * iucn,
+               family = "binomial", 
+               data = alliucn_excPE)
+    # Significance of interaction
+    mod_noInter <-
+      update(mod, .~. -className:iucn)
+    results_excPE_inter <-
+      anova(mod_noInter, 
+            mod, test = "LRT")
+    
+    # Significance of taxonomic Class
+    results_excPE_class <- 
+      anova(update(mod_noInter, .~.-className), mod_noInter, test = "LRT")
+    # Significance of IUCN category
+    results_excPE_iucn <- 
+      anova(update(mod_noInter, .~.-iucn), mod_noInter, test = "LRT")
+    
+    
+    if(results_excPE_inter$`Pr(>Chi)`[2] <= 0.05) {
+      mod <- mod
+    } else{
+      mod <- mod_noInter
+    }
+    
+    return(list(prop = prop,
+                mod = mod, 
+                results_excPE_inter = results_excPE_inter,
+                results_excPE_class = results_excPE_class, 
+                results_excPE_iucn = results_excPE_iucn))
+  })
+names(results_excPE_actionZero)  <- actions_zero_props
+
+# Retrieve results for each action type
+results_excPE_actionZero_mod <-
+  map(results_excPE_actionZero, pluck, function(x) x$mod)
+results_excPE_actionZero_inter <-
+  map(results_excPE_actionZero, pluck, function(x) x$results_excPE_inter)
+results_excPE_actionZero_class <-
+  map(results_excPE_actionZero, pluck, function(x) x$results_excPE_class)
+results_excPE_actionZero_iucn <-
+  map(results_excPE_actionZero, pluck, function(x) x$results_excPE_iucn)
+
+# Write
+save(results_excPE_actionZero,
+     results_excPE_actionZero_mod, 
+     results_excPE_actionZero_inter,
+     results_excPE_actionZero_class, 
+     results_excPE_actionZero_iucn,
+     file = "models/som/results_excPE_zero.Rdata")
+```
+

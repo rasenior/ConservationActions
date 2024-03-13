@@ -1,0 +1,1972 @@
+# Main and supplementary figures
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r packages}
+# Package names
+packages <-  c("dplyr", "tidyr","purrr",
+               "sf", "ggplot2","RColorBrewer","rphylopic","cowplot","scales",
+               "DiagrammeR","DiagrammeRsvg","rsvg")
+
+# Install packages not yet installed
+installed_packages <- packages %in% rownames(installed.packages())
+if (any(installed_packages == FALSE)) {
+    install.packages(packages[!installed_packages])
+}
+
+# Packages loading
+invisible(lapply(packages, library, character.only = TRUE))
+```
+
+```{r functions}
+# Plotting parameters
+options(scipen=99)
+myTheme <- function(base_size = 12, base_family = "") 
+{
+  theme_bw(base_size = base_size, base_family = base_family) %+replace% 
+    theme(axis.text = element_text(size = 8, 
+                                   colour = "black"),
+          axis.title = element_text(size = 10, 
+                                    vjust = 1, 
+                                    face = "bold"),
+          legend.text = element_text(size = 8, 
+                                   colour = "black"),
+          legend.title = element_text(size = 10),
+          strip.text = element_text(size = 10,
+                                    margin = margin(0.1,0.1,0.1,0.1, "cm")),
+          strip.background = element_blank(),
+          panel.grid = element_blank())
+}
+
+# Define function to capitalise first letter
+capitalise <- function(string) {
+  substr(string, 1, 1) <- toupper(substr(string, 1, 1))
+  string
+}
+
+# A function factory for getting integer y-axis values.
+integer_breaks <- function(n = 5, ...) {
+fxn <- function(x) {
+breaks <- floor(pretty(x, n, ...))
+names(breaks) <- attr(breaks, "labels")
+breaks
+}
+return(fxn)
+}
+
+# Function to calculate inverse logit
+inv.logit <- function(x) exp(x)/(1 + exp(x))
+
+# Function to calculate critical significance value
+ci.critical <- 
+  function(siglevel) qnorm((100 - siglevel) / 100 / 2, lower.tail = FALSE)
+ci_const = ci.critical(95)
+```
+
+```{r data}
+# Main data
+alliucn <- readRDS("data/analysis/main/all_iucn_prepped.Rds")
+
+# Other useful things
+verts <- c("amphibia", "aves", "mammalia")
+matched_threats <- c("threat_habitat_change", "threat_resource_use", "threat_inv_spp" )
+matched_actions <- c("matched_hc", "matched_ru", "matched_is")
+paProps <- c(1,5,10,25,50,75,90,95,99)
+```
+
+```{r sort-data}
+# Spatial endemics -------------------------------------------------------------
+endemic_realm <-
+  alliucn %>% 
+  filter(
+    !(is.na(realms)),
+    !(grepl(";", realms))) %>% 
+  dplyr::select(scientificName, className, realms, actions_zero_sps) %>% 
+  separate_rows(realms, sep = ";") %>% 
+  rename(realm = realms)
+endemic_country <-
+  alliucn %>% 
+  filter(
+    !(is.na(countries_MOL_all)),
+    !(grepl(";", countries_MOL_all))) %>% 
+  dplyr::select(scientificName, className, countries_MOL_all, actions_zero_sps) %>% 
+  separate_rows(countries_MOL_all, sep = ";") %>% 
+  rename(country = countries_MOL_all)
+
+# Sum threatened endemic species by country
+ctry_threatspp <-
+  group_by(endemic_country, country) %>% 
+  summarise(n = n())
+
+# Threat presence/absence ------------------------------------------------------
+alliucn_threats <-
+  gather(alliucn, key = "threat", value = "threat_present", 
+         starts_with("threat_"), -"threat_count") %>% 
+    # Relevel
+    mutate(threat = factor(threat,
+                           levels = c("threat_habitat_change",
+                                      "threat_resource_use", 
+                                      "threat_inv_spp", 
+                                      "threat_pollution",
+                                      "threat_climate_change",
+                                      "threat_other")),
+           className =  factor(className,
+                               levels = sort(unique(className)))) %>% 
+  # Drop NAs
+  filter(!(is.na(threat_present))) %>% 
+  dplyr::select(scientificName, className, iucn, ED, EDGE.Rank,cat_change_bi,
+                threat, threat_present, threat_count, 
+                starts_with("matched_"), 
+                starts_with("action_count_"))
+
+# EDGE -------------------------------------------------------------------------
+alliucn_EDGE <-
+  alliucn %>% 
+  filter(className %in% c("amphibia","aves","mammalia"),
+         !(is.na(ED))) %>%  
+  mutate(EDGE = case_when(is.na(EDGE.Rank) ~ FALSE,
+                          !(is.na(EDGE.Rank)) ~ TRUE),
+         ED = as.numeric(ED)) %>% 
+  dplyr::select(scientificName, className, iucn, EDGE, ED, actions_zero_sps) %>% 
+  # Standardise ED within taxonomic class to make comparable between classes
+  group_by(className) %>% 
+  reframe(ED_max = max(ED),
+            ED_min = min(ED),
+            ED_stand = ED / max(ED),
+            scientificName = scientificName, 
+            iucn = iucn, 
+            EDGE = EDGE, 
+            ED = ED, 
+            actions_zero_sps = actions_zero_sps)
+
+# Matched action presence/absence -----------------------------------------------
+alliucn_matched <- 
+  alliucn_threats %>% 
+  filter(
+    # Threat is present
+    threat_present == 1,
+    # Threat is  habitat change/resource use/invasive species
+    threat %in% matched_threats
+    ) %>% 
+  # Relevel
+  mutate(threat = factor(threat,
+                         levels = c("threat_habitat_change",
+                                    "threat_resource_use",
+                                    "threat_inv_spp"),
+                         labels = c("threat_habitat_change",
+                                    "threat_overexploitation",
+                                    "threat_inv_spp")))
+endemic_realm_matched <- 
+  left_join(alliucn_matched, dplyr::select(endemic_realm, - className), 
+            by = "scientificName") %>% 
+  filter(!(is.na(realm)))
+endemic_country_matched <- 
+  left_join(alliucn_matched, dplyr::select(endemic_country, - className), 
+            by = "scientificName") %>% 
+  filter(!(is.na(country)))
+
+# Status change ----------------------------------------------------------------
+statchange <- readRDS("data/analysis/main/status_change_prepped.Rds")
+statchange_matched <-
+  # Gather threats
+  gather(statchange, key = "threat", value = "threat_present", 
+         starts_with("threat_"), -"threat_count") %>% 
+  filter(
+    # Only considering habitat change/resource use/invasive species
+    threat %in% matched_threats,
+    # Threat is present
+    threat_present == 1,
+    # Only one major threat
+    threat_count <= 1
+    ) %>% 
+  # Relevel
+  mutate(rangeArTot = as.numeric(rangeArTot),
+         LogRangeArea = log(rangeArTot)) %>% 
+  dplyr::select(scientificName, className, familyName, 
+                threat, threat_count, 
+                cat_old_cat, change_reason, cat_change_bi,
+                LogBodyMass, iucn, islandSp_95, 
+                starts_with("matched_action_"), starts_with("action_count_"))
+```
+
+```{r create-dirs}
+# Create output dirs to hold figures
+dir.create("figs/exploratory", recursive = TRUE)
+dir.create("figs/phylopic")
+dir.create("figs/schematic")
+```
+
+```{r plotting-params}
+phylopics <- read.csv("data/phylopic_credits.csv")
+imgs <- lapply(1:nrow(phylopics), function(x) {
+    # Get phylopic in raster format
+    img_vec <- get_phylopic(uuid = phylopics$uuid[x], format = "vector")
+    img_rast <- get_phylopic(uuid = phylopics$uuid[x], format = "raster")
+    # Write to file for use later on
+    save_phylopic(img = img_vec, 
+                  path = file.path("figs","phylopic",
+                                   paste(phylopics$class[x],".png",sep = "")), 
+                  width = 500, height = 500)
+    
+    return(img_rast)
+})
+names(imgs) <- phylopics$class
+# Write to file for later on
+saveRDS(imgs, "figs/phylopic/phylopics.Rds")
+
+# Lookups
+class_lookup <- capitalise(sort(unique(alliucn$className)))
+names(class_lookup) <- sort(unique(alliucn$className))
+action_lookup <- c("Habitat change", "Overexploitation", "Invasive species")
+names(action_lookup) <- matched_actions
+threat_lookup <- action_lookup
+names(threat_lookup) <- matched_threats
+iucn_lookup <- c("Vulnerable", "Endangered", "Critically Endangered")
+names(iucn_lookup) <- sort(unique(alliucn$iucn))
+
+# Palettes
+propPal <- colorRampPalette(brewer.pal(9, "Greens"))(15)
+iucnPal <- RColorBrewer::brewer.pal(9, "YlOrRd")[c(4,6,8)]
+
+# Other
+ci_const <- ci.critical(95)
+paProps <- c(1,5,10,25,50,75,90,95,99)
+```
+
+# Raw values
+
+```{r action-zero-prep}
+# Sort data
+actions_zero_props <- names(alliucn)[grep("actions_zero_",names(alliucn))]
+
+zero_action_sum <- 
+  lapply(actions_zero_props, function(prop){
+    alliucn %>% 
+      group_by(className, iucn) %>% 
+      summarise(N = length(which(!(is.na(!!sym(prop))))),
+                nT = sum(!!sym(prop), na.rm = TRUE)) %>% 
+      mutate(className = factor(className,
+                                levels = names(class_lookup),
+                                labels = class_lookup),
+             classNumeric = as.numeric(className),
+             paProp = prop)
+  })
+zero_action_sum <-
+  lapply(zero_action_sum, function(i){
+    i %>% 
+      left_join(group_by(i, className) %>% 
+                  summarise(classN = sum(N)),
+                by = "className") %>% 
+    filter(classN != 0)
+  }) 
+names(zero_action_sum) <- actions_zero_props
+```
+
+```{r action-zero-sps}
+# Plot just SPS prop 
+p <-
+  ggplot(data = zero_action_sum$actions_zero_sps) +
+  geom_text(aes(x = className,
+                y = 1.05,
+                label = classN),
+            size = 2.2,
+            colour = "black") +
+  geom_bar(aes(x = className, 
+                 y = nT / N,
+                 fill = factor(iucn)), 
+            stat = "identity",
+             position = position_dodge(),
+             size = 1)  +
+  ylab("Proportion of species with\nzero interventions (%)") +
+  myTheme() +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = 
+          element_text(colour = "black",
+                       angle = 90, 
+                       hjust = 1, vjust = 0.5),
+        legend.key.size = unit(0.4, "cm"),
+        legend.margin = margin(0,0,-0.3,0,"cm"), 
+        legend.position = "top") +
+  scale_fill_manual(labels = c("VU", "EN", "CR"),
+                      name = NULL,
+                      values = iucnPal) +
+  scale_y_continuous(limits = c(0, 1.17),
+                     breaks = seq(0, 1, 0.2),
+                     labels = seq(0, 100, 20))
+
+sub_imgs <- imgs[match(tolower(unique(zero_action_sum$actions_zero_sps$className)),names(imgs))]
+
+for (i in 1:length(sub_imgs)) {
+  x <- (1:length(sub_imgs))[i]
+  p <- p +
+    add_phylopic(img = sub_imgs[[i]], 
+                 alpha = 1, x = x, y = 1.15, ysize = 0.09)
+}
+p
+
+ggsave( filename = "figs/exploratory/action_zero_raw.png",
+       width = 8, height = 10, units = "cm", dpi = 800)
+```
+
+```{r action-zero-all}
+zero_action_sum <- 
+    bind_rows(zero_action_sum) %>% 
+    mutate(paProp = factor(paProp,
+                           levels = unique(paProp)))
+
+p <-
+  ggplot(data = zero_action_sum) +
+  facet_wrap(~ iucn, ncol = 3, nrow = 3, 
+             labeller = labeller(iucn  = iucn_lookup)) +
+  geom_bar(aes(x = className, 
+                 y = nT / N,
+                 fill = factor(paProp)), 
+           stat = "identity",
+           position = position_dodge(width = 0.9),
+           size = 0.5) +
+  ylab("Proportion of species with\nzero interventions (%)") +
+  myTheme() +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = 
+          element_text(colour = "black",
+                       angle = 90, 
+                       hjust = 1, vjust = 0.5),
+        legend.key.size = unit(0.4, "cm"),
+        legend.margin = margin(0,0,0,0,"cm"),
+        legend.position = "top") +
+  scale_fill_manual(values = c(
+      # First three taken from BrBGn RColorBrewer palette
+      "#543005","#bf812d","#dfc27d",
+      # Remainder from Greens sequential palette
+      propPal[ceiling(seq(2,15,length.out = 9))]), 
+      labels = c("Species target (SPS)",
+                 "Species target (w/o RL data)",
+                 "Species target (w RL data)",
+                 paste(paProps,"%",sep = ""))) +
+    scale_y_continuous(
+        limits = c(0, 1.06),
+        breaks = seq(0, 1, 0.2),
+        labels = seq(0, 100, 20)) + 
+    guides(fill = guide_legend(title = "PA threshold", 
+                               nrow = 3, 
+                               title.position = "left"))
+
+sub_imgs <- imgs[match(tolower(sort(unique(zero_action_sum$className))),names(imgs))]
+
+for (i in 1:length(sub_imgs)) {
+  x <- (1:length(sub_imgs))[i]
+  p <- p +
+    add_phylopic(img = sub_imgs[[i]], 
+                 alpha = 1, x = x, y = 1.05, ysize = 0.05)
+}
+p
+
+ggsave( filename = "figs/exploratory/action_zero_raw_all.png",
+       width = 16.6, height = 12, units = "cm", dpi = 800)
+```
+
+```{r action-matched-prep}
+matched_actions_all <- names(alliucn)[grep("matched_",names(alliucn))]
+
+# Sort data
+matched_action_sum <- 
+    lapply(matched_actions_all, function(i){
+        # Identify threat from matched action i
+        threat <- ifelse(grepl("_hc_",i), "threat_habitat_change",
+                         ifelse(grepl("_ru",i), "threat_overexploitation",
+                                ifelse(grepl("_is",i), "threat_inv_spp",
+                                       NA)))
+        result <- 
+            # Filter to this threat only
+            alliucn_matched[alliucn_matched$threat == threat,] %>%
+            # Group by taxonomic class & RL category 
+            group_by(className, iucn, .drop = FALSE) %>% 
+            summarise(
+                # Count all species considered (i.e. not NA)
+                N = length(which(!(is.na(!!sym(i))))),
+                # Count species with matched action
+                nT = sum(!!sym(i), na.rm = TRUE)
+            ) %>%
+            ungroup() %>% 
+            complete(className,
+                     iucn,
+                     fill = list(N = NA, nT = NA)) %>%
+            filter(!(is.na(iucn))) %>% 
+            mutate(threat = threat,
+                   matched_action = i,
+                   className = factor(className,
+                                      levels = names(class_lookup),
+                                      labels = class_lookup),
+                   classNumeric = as.numeric(className)
+            )
+        return(result)
+    }) %>% 
+    bind_rows()
+
+# How many species assessed in each class and threat
+matched_action_sum_sum <-
+    matched_action_sum %>% 
+    group_by(threat,matched_action,className) %>% 
+    summarise(classN = sum(N, na.rm = TRUE))
+
+# Join
+matched_action_sum <- 
+    left_join(matched_action_sum, matched_action_sum_sum, 
+              by = c("threat","matched_action","className")) %>% 
+    mutate(
+        threat = factor(threat,
+                        levels = c("threat_habitat_change",
+                                   "threat_overexploitation",
+                                   "threat_inv_spp"),
+                        labels = threat_lookup),
+        matched_action = factor(matched_action,
+                                levels = c(
+                                    "matched_hc_sps",
+                                    "matched_hc_target", "matched_hc_targetRL",
+                                    paste("matched_hc_",paProps, sep = ""),
+                                    "matched_ru","matched_is"))
+    )
+rm(matched_action_sum_sum)
+```
+
+```{r action-matched-sps}
+p <-
+  ggplot(data = filter(matched_action_sum, 
+                       matched_action %in% c("matched_hc_sps",
+                                             "matched_ru",
+                                             "matched_is"))) +
+  facet_wrap(~ threat, ncol = 1) +
+  geom_text(aes(x = className,
+                y = 1.08,
+                label = classN),
+            size = 2.2,
+            colour = "black") +
+  geom_bar(aes(x = className, 
+               y = nT / N,
+               fill = factor(iucn)),
+           stat = "identity", 
+           position = position_dodge())  +
+  ylab("Proportion of species with\nappropriate intervention (%)") +
+  myTheme() +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = 
+          element_text(colour = "black",
+                       angle = 90, 
+                       hjust = 1, vjust = 0.5),
+        legend.key.size = unit(0.4, "cm"),
+        legend.margin = margin(0,0,-0.3,0,"cm"), 
+        legend.position = "top") +
+  scale_fill_manual(labels = c("VU", 
+                               "EN", 
+                               "CR"),
+                    na.translate = FALSE,
+                    name = NULL,
+                    values = iucnPal) +
+  scale_y_continuous(limits = c(0, 1.25),
+                     breaks = seq(0, 1, 0.2),
+                     labels = seq(0, 100, 20)) +
+  scale_x_discrete(labels = class_lookup)
+
+sub_imgs <- imgs[match(tolower(unique(matched_action_sum$className)),names(imgs))]
+
+for (i in 1:length(sub_imgs)) {
+  x <- (1:length(sub_imgs))[i]
+  p <- p +
+    add_phylopic(img = sub_imgs[[i]], 
+                 alpha = 1, x = x, y = 1.2, ysize = 0.1)
+}
+p
+
+ggsave(plot = p, filename = "figs/exploratory/match_raw.png",
+        width = 8, height = 15, units = "cm", dpi = 800)
+```
+
+```{r action-matched-all}
+p <-
+  ggplot(data = filter(matched_action_sum, threat == "Habitat change")) +
+  facet_wrap(~ iucn, ncol = 3, nrow = 3, 
+             labeller = labeller(iucn  = iucn_lookup)) +
+  geom_bar(aes(x = className, 
+               y = nT / N,
+               fill = factor(matched_action)),
+           stat = "identity", 
+           position = position_dodge())  +
+  ylab("Proportion of species with\nappropriate intervention (%)") +
+  myTheme() +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = 
+          element_text(colour = "black",
+                       angle = 90, 
+                       hjust = 1, vjust = 0.5),
+        legend.key.size = unit(0.4, "cm"),
+        legend.margin = margin(0,0,-0.3,0,"cm"), 
+        legend.position = "top") +
+  scale_y_continuous(limits = c(0, 1.03),
+                     breaks = seq(0, 1, 0.2),
+                     labels = seq(0, 100, 20)) +
+  scale_x_discrete(labels = class_lookup) +
+    scale_fill_manual(
+        values = c(
+            # First three taken from BrBGn RColorBrewer palette
+            "#543005","#bf812d","#dfc27d",
+            # Remainder from Greens sequential palette
+            propPal[ceiling(seq(2,15,length.out = 9))]), 
+        labels = c("Species target (SPS)",
+                   "Species target (w/o RL data)",
+                   "Species target (w RL data)",
+                   paste(paProps,"%",sep = ""))) +
+  guides(fill = guide_legend(title = "PA threshold (%)", 
+                               nrow = 3, 
+                               title.position = "left"))
+
+sub_imgs <- imgs[match(tolower(unique(matched_action_sum$className)),names(imgs))]
+
+for (i in 1:length(sub_imgs)) {
+  x <- (1:length(sub_imgs))[i]
+  p <- p +
+    add_phylopic(img = sub_imgs[[i]], 
+                 alpha = 1, x = x, y = 1.03, ysize = 0.05)
+}
+p
+
+ggsave(plot = p, filename = "figs/exploratory/match_raw_all.png",
+        width = 16.6, height = 15, units = "cm", dpi = 800)
+```
+
+# Model-predicted values
+
+```{r threat, eval = FALSE}
+load("models/main/results_threats.Rdata")
+
+# Interaction between class and IUCN significant for habitat change, 
+# invasive species, pollution and 'other'
+
+# Class significant for all threats
+
+# IUCN significant for invasive species, climate change and 'other'
+
+threat_newdat <-
+  lapply(1:length(results_threats_mod), function(i){
+    # Count species in each class
+    mod <- results_threats_mod[[i]]
+    mod_df <- mod$data
+    mod_df_sum <-
+      group_by(mod_df, className) %>% 
+      summarise(N = n())
+    
+    # Probability of each threat being implemented by class & IUCN status
+    newdat <-
+      expand.grid(className = unique(alliucn$className),
+                  iucn = unique(alliucn$iucn)) %>% 
+      left_join(mod_df_sum, by = "className")
+    newdat[,c("threat_present", "se")] <- 
+      predict(results_threats_mod[[i]], newdata = newdat, 
+              type = "link", se.fit = TRUE)[1:2]
+    newdat <- 
+      as.data.frame(newdat) %>% 
+      mutate(CI_lo = threat_present - ci_const * se,
+             CI_hi = threat_present + ci_const * se,
+             className = factor(className,
+                                levels = sort(unique(alliucn$className)),
+                                labels = capitalise(sort(unique(alliucn$className)))),
+             threat = names(results_threats_mod)[i]) %>% 
+      mutate(threat_present = inv.logit(threat_present),
+             se = inv.logit(se),
+             CI_lo = inv.logit(CI_lo),
+             CI_hi = inv.logit(CI_hi))
+      # Coerce to NA when SE = 1 (i.e. no variation in response level, all values the same)
+    newdat[which(newdat$se == 1), c("se","CI_lo","CI_hi")] <- NA
+    return(newdat)
+  }) %>% 
+  bind_rows() %>% 
+  mutate(threat = factor(threat,
+                         levels = c("threat_habitat_change",
+                                      "threat_resource_use", 
+                                      "threat_inv_spp", 
+                                      "threat_pollution",
+                                      "threat_climate_change",
+                                      "threat_other"),
+                         labels = c("Habitat change", 
+                                    "Overexploitation", 
+                                    "Invasive species",
+                                    "Pollution", 
+                                    "Climate change",
+                                    "Other")),
+         classNumeric = as.numeric(className),
+         # className = paste(className, " (", N, ") ", sep = "")
+         )
+
+p <-
+ggplot() +
+  geom_point(data = threat_newdat,
+             aes(x = className,
+                 y = threat_present,
+                 colour = factor(iucn)),
+             position = position_dodge(width = 0.7),
+             colour = "transparent") +
+  geom_rect(data = threat_newdat,
+            aes(xmin = classNumeric - 0.5, 
+                xmax = classNumeric + 0.5, 
+                ymin = -Inf, 
+                ymax = Inf, 
+                fill = className), 
+            alpha = 0.5) +
+  geom_text(data = threat_newdat,
+             aes(x = className,
+                 y = 1.08,
+                 label = N),
+            size = 2.5,
+            colour = "black") +
+  geom_point(data = threat_newdat,
+             aes(x = className,
+                 y = threat_present,
+                 colour = factor(iucn)),
+             position = position_dodge(width = 0.7),
+             size = 1) +
+  geom_errorbar(data = threat_newdat,
+                aes(x = className,
+                    ymin = CI_lo,
+                    ymax = CI_hi,
+                    colour = factor(iucn)),
+                position = position_dodge(width = 0.7),
+                width = 0,
+                size = 0.5) +
+  ylab("Probability of threat (%)") +
+  facet_wrap(~ threat, ncol = 2) +
+  myTheme() +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = 
+          element_text(colour = "black", 
+                       # size = 8,
+                       angle = 45, 
+                       hjust = 1, 
+                       vjust = 1),
+        legend.margin = margin(0,0,-0.3,0),
+        legend.position = "top") +
+  scale_colour_manual(labels = c("VU", "EN", "CR"),
+                      name = NULL,
+                      values = iucnPal) +
+  scale_fill_manual(guide = NULL,
+                    values = rep(c("grey90", "grey95"), 5)) +
+  scale_y_continuous(limits = c(0, 1.22),
+                     breaks = seq(0, 1, 0.25),
+                     labels = seq(0, 100, 25))
+
+sub_imgs <- imgs[match(tolower(unique(threat_newdat$className)),names(imgs))]
+
+for (i in 1:length(sub_imgs)) {
+  x <- (1:length(sub_imgs))[i]
+  p <- p +
+      add_phylopic(img = sub_imgs[[i]], 
+                   alpha = 1, x = x, y = 1.2, ysize = 0.09)
+}
+p
+
+ggsave(p, filename = "figs/exploratory/threat_prob.png",
+       width = 16.6, height = 20, units = "cm", dpi = 800)
+# Write model-predicted values
+saveRDS(threat_newdat,"models/main/newdat_threats.Rds")
+```
+
+```{r action-zero-prep}
+# What influences the probability of having zero actions?
+load("models/main/results_zero.Rdata")
+
+results_actionZero_inter
+results_actionZero_class
+results_actionZero_iucn
+
+# Interaction between class and IUCN significant
+# Class significant
+# IUCN significant
+
+# Function to create newdat for each threshold PA value
+newdat_actionZero <- function(i, ci_const){
+  # Get threshold used
+  prop <- gsub("actions_zero_prop", "", i$prop)
+  mod <- i$mod
+  dat <- i$mod$data
+  
+  # Count species in each class considered in analysis (not NA)
+  mod_df_sum <-
+    group_by(dat, className) %>% 
+    summarise(N = length(which(!(is.na(!!sym(i$prop))))))
+  
+  # Determine classes included in analysis
+  classes <- mod_df_sum$className[mod_df_sum$N != 0]
+      
+  # Create newdat
+  action_zero_newdat <-
+    expand.grid(className = sort(classes),
+                iucn = unique(dat$iucn)) %>% 
+    left_join(mod_df_sum, by = "className")
+  
+  # Predict new vals
+  action_zero_newdat[,c("action_zero", "se")] <- 
+    predict(mod, newdata = action_zero_newdat, 
+            type = "link", se.fit = TRUE)[1:2]
+  action_zero_newdat <- 
+    as.data.frame(action_zero_newdat) %>% 
+    mutate(CI_lo = action_zero - ci_const * se,
+           CI_hi = action_zero + ci_const * se) %>% 
+    mutate(action_zero = inv.logit(action_zero),
+           se = inv.logit(se),
+           CI_lo = inv.logit(CI_lo),
+           CI_hi = inv.logit(CI_hi)) %>%
+    # Sort class as a factor
+    mutate(paProp = prop)
+  # Coerce to NA when SE = 1 (i.e. no variation in response level, all values the same)
+  action_zero_newdat[
+      which(action_zero_newdat$se == 1), c("se","CI_lo","CI_hi")] <- NA
+  
+  # Return
+  return(action_zero_newdat)
+}
+
+action_zero_newdat <- 
+  lapply(results_actionZero, newdat_actionZero, ci_const)
+```
+
+```{r action-zero-all}
+action_zero_newdat_all <- 
+    bind_rows(action_zero_newdat) %>% 
+    filter(!(is.na(se))) %>% 
+    mutate(paProp = factor(paProp,
+                           levels = c("actions_zero_sps",
+                                      "actions_zero_target","actions_zero_targetRL",
+                                      paProps),
+                           labels = c("Species target (SPS)",
+                                      "Species target (w/o RL data)",
+                                      "Species target (w RL data)",
+                                      paste(paProps,"%", sep = ""))),
+           className = 
+               factor(className,
+                      levels = sort(unique(className)),
+                      labels = capitalise(sort(unique(className)))),
+           classNumeric = as.numeric(className))
+           
+p <-
+  ggplot() +
+  facet_wrap(~ paProp, ncol = 3) +
+  geom_point(data = action_zero_newdat_all,
+             aes(x = className,
+                 y = action_zero),
+             position = position_dodge(width = 0.7),
+             colour = "transparent") +
+  geom_rect(data = action_zero_newdat_all,
+            aes(xmin = classNumeric - 0.5,
+                xmax = classNumeric + 0.5,
+                ymin = -Inf,
+                ymax = Inf,
+                fill = className),
+            alpha = 0.5) +
+  geom_text(data = action_zero_newdat_all,
+            aes(x = className,
+                y = 1.05,
+                 label = N),
+            size = 2.2,
+            colour = "black") +
+  geom_point(data = action_zero_newdat_all,
+             aes(x = className,
+                 y = action_zero,
+                 colour = factor(iucn)),
+             position = position_dodge(width = 0.7),
+             size = 1) +
+  geom_errorbar(data = action_zero_newdat_all,
+                aes(x = className,
+                    ymin = CI_lo,
+                    ymax = CI_hi,
+                    colour = factor(iucn)),
+                position = position_dodge(width = 0.7),
+                width = 0,
+                size = 0.5) +
+  ylab("Probability of zero interventions (%)")  +
+  myTheme() +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = 
+            element_text(colour = "black", 
+                         # size = 8,
+                         angle = 45, 
+                         hjust = 1, 
+                         vjust = 1),
+        legend.margin = margin(0,0,-0.3,0),
+        legend.position = "top") +
+  scale_colour_manual(labels = c("VU", "EN", "CR"),
+                      name = NULL,
+                      values = iucnPal) +
+  scale_fill_manual(guide = NULL,
+                    values = rep(c("grey90", "grey95"), 5)) +
+  scale_y_continuous(limits = c(0, 1.35),
+                     breaks = seq(0, 1, 0.2),
+                     labels = seq(0, 100, 20))
+
+sub_imgs <- imgs[match(tolower(sort(unique(action_zero_newdat_all$className))),names(imgs))]
+
+for (i in 1:length(sub_imgs)) {
+  x <- (1:length(sub_imgs))[i]
+  p <- p +
+      add_phylopic(img = sub_imgs[[i]], 
+                   alpha = 1, x = x, y = 1.25, ysize = 0.2)
+}
+p
+
+ggsave(p, filename = "figs/exploratory/action_zero_all.png",
+       width = 16.6, height = 20, units = "cm", dpi = 800)
+# Write model-predicted values
+saveRDS(action_zero_newdat_all,"models/main/newdat_zero_all.Rds")
+```
+
+```{r action-zero-sps}
+action_zero_newdat_old <- action_zero_newdat
+action_zero_newdat <- 
+    action_zero_newdat$actions_zero_sps %>% 
+    mutate(className = 
+               factor(className,
+                      levels = sort(unique(className)),
+                      labels = capitalise(sort(unique(className)))),
+           classNumeric = as.numeric(className))
+
+p <-
+  ggplot() +
+  geom_point(data = action_zero_newdat,
+             aes(x = className,
+                 y = action_zero),
+             position = position_dodge(width = 0.7),
+             colour = "transparent") +
+  geom_rect(data = action_zero_newdat,
+            aes(xmin = classNumeric - 0.5, 
+                xmax = classNumeric + 0.5, 
+                ymin = -Inf, 
+                ymax = Inf, 
+                fill = className), 
+            alpha = 0.5) +
+  geom_text(data = action_zero_newdat,
+            aes(x = className,
+                y = 1.05,
+                 label = N),
+            size = 2.2,
+            colour = "black") +
+  geom_point(data = action_zero_newdat,
+             aes(x = className,
+                 y = action_zero,
+                 colour = factor(iucn)),
+             position = position_dodge(width = 0.7),
+             size = 1) +
+  geom_errorbar(data = action_zero_newdat,
+                aes(x = className,
+                    ymin = CI_lo,
+                    ymax = CI_hi,
+                    colour = factor(iucn)),
+                position = position_dodge(width = 0.7),
+                width = 0,
+                size = 0.5) +
+  ylab("Probability of zero interventions (%)")  +
+  myTheme() +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = 
+          element_text(colour = "black",
+                       angle = 90, 
+                       hjust = 1, vjust = 0.5),
+        legend.margin = margin(0,0,-0.3,0),
+        legend.position = "top") +
+  scale_colour_manual(labels = c("VU", "EN", "CR"),
+                      name = NULL,
+                      values = iucnPal) +
+  scale_fill_manual(guide = NULL,
+                    values = rep(c("grey90", "grey95"), 5)) +
+  scale_y_continuous(limits = c(0, 1.2),
+                     breaks = seq(0, 1, 0.2),
+                     labels = seq(0, 100, 20))
+
+sub_imgs <- imgs[match(tolower(unique(action_zero_newdat$className)),names(imgs))]
+
+for (i in 1:length(sub_imgs)) {
+  x <- (1:length(sub_imgs))[i]
+  p <- p +
+      add_phylopic(img = sub_imgs[[i]], 
+                   alpha = 1, x = x, y = 1.15, ysize = 0.1)
+}
+p
+
+ggsave(p, filename = "figs/exploratory/action_zero.png",
+       width = 8, height = 10, units = "cm", dpi = 800)
+# Write model-predicted values
+saveRDS(action_zero_newdat,"models/main/newdat_zero.Rds")
+```
+
+```{r action-zero-ED}
+load("models/main/results_actionZero_EDGE.Rdata")
+action_zero_ED_newdat <- 
+  expand.grid(className = unique(alliucn_EDGE$className),
+              iucn = unique(alliucn_EDGE$iucn),
+              ED_stand = seq(min(alliucn_EDGE$ED_stand),
+                             max(alliucn_EDGE$ED_stand), length.out = 100))
+predvals <- 
+  predict(results_actionZero_ED_mod, action_zero_ED_newdat, 
+          type = "link", se.fit = TRUE)
+action_zero_ED_newdat <- 
+    as.data.frame(action_zero_ED_newdat) %>%
+  mutate(action_zero = predvals$fit,
+         se = predvals$se.fit,
+         CI_lo = action_zero - ci_const * se,
+         CI_hi = action_zero + ci_const * se) %>% 
+    mutate(action_zero = inv.logit(action_zero),
+           se = inv.logit(se),
+           CI_lo = inv.logit(CI_lo),
+           CI_hi = inv.logit(CI_hi),
+           className = factor(className,
+                              levels = c("amphibia","aves","mammalia"),
+                              labels = c("Amphibia","Aves","Mammalia")),
+           iucn = factor(iucn,
+                         levels = 3:5,
+                         labels = c("Vulnerable", 
+                                    "Endangered", 
+                                    "Critically Endangered")))
+
+p <-
+  ggplot(action_zero_ED_newdat, aes(x = ED_stand, y = action_zero,
+                     fill = iucn,
+                     colour = iucn)) +
+  facet_wrap(~ className) +
+  geom_ribbon(aes(ymin = CI_lo, 
+                  ymax = CI_hi), 
+              alpha = 0.3,
+              colour = "transparent") +
+  geom_line() +
+  xlab("Evolutionary Distinctiveness")  +
+  ylab("Probability of zero interventions (%)")  +
+  myTheme() +
+  theme(axis.text.x = 
+          element_text(colour = "black",
+                       angle = 45, 
+                       hjust = 0.5, vjust = 0.5),
+        legend.margin = margin(0,0,-0.3,0),
+        legend.key.size = unit(0.4, "cm"),
+        legend.position = "top") +
+  scale_fill_manual(name = NULL,
+                    values = iucnPal,
+                    labels = c("VU", "EN", "CR")) +
+  scale_colour_manual(name = NULL,
+                      values = iucnPal,
+                      labels = c("VU", "EN", "CR")) +
+  scale_y_continuous(limits = c(0, 1),
+                     breaks = seq(0, 1, 0.2),
+                     labels = seq(0, 100, 20))
+p
+ggsave(p, filename = "figs/exploratory/action_zero_ED.png",
+       width = 8, height = 10, units = "cm", dpi = 800)
+# Write model-predicted values
+saveRDS(action_zero_ED_newdat,"models/main/newdat_zero_ED.Rds")
+```
+
+```{r action-matched-sps}
+load("models/main/results_match.Rdata")
+
+results_match_inter
+# Interaction between class and IUCN significant only for habitat change
+results_match_class
+# Class significant for all
+results_match_iucn
+# IUCN not significant
+
+threats <- names(results_match_mod)
+actions <- c("matched_hc_sps", "matched_ru", "matched_is")
+
+# Sort data
+actionMatch_newdat <-
+  lapply(1:length(results_match_mod), function(i){
+    # Count species in each class
+    mod <- results_match_mod[[i]]
+    classes <- as.character(mod$classes)
+    mod_df <- mod$data
+    # Count species in each class considered in analysis (not NA)
+    mod_df_sum <-
+        group_by(mod_df, className) %>%
+        summarise(N = length(which(!(is.na(!!sym(actions[[i]]))))))
+    
+    # Probability of each action being implemented by class & IUCN status
+    newdat <-
+      expand.grid(className = classes,
+                  iucn = unique(alliucn$iucn)) %>% 
+      left_join(mod_df_sum, by = "className")
+    newdat[,c("matched_action", "se")] <- 
+      predict(results_match_mod[[i]], newdata = newdat, 
+              type = "link", se.fit = TRUE)[1:2]
+    newdat <- 
+      as.data.frame(newdat) %>% 
+      mutate(CI_lo = matched_action - ci_const * se,
+             CI_hi = matched_action + ci_const * se,
+             className = factor(className,
+                                levels = sort(classes),
+                                labels = capitalise(sort(classes))),
+             threat = names(results_match_mod)[i]) %>% 
+      mutate(matched_action = inv.logit(matched_action),
+             se = inv.logit(se),
+             CI_lo = inv.logit(CI_lo),
+             CI_hi = inv.logit(CI_hi))
+      # Coerce to NA when SE = 1 (i.e. no variation in response level, all values the same)
+    newdat[which(newdat$se == 1), c("se","CI_lo","CI_hi")] <- NA
+    return(newdat)
+  }) %>% 
+  bind_rows() %>% 
+  mutate(threat = factor(threat,
+                         levels = c("threat_habitat_change", 
+                                    "threat_overexploitation", 
+                                    "threat_inv_spp" ),
+                         labels = c("Habitat change", 
+                                    "Overexploitation", 
+                                    "Invasive species")),
+         className = as.factor(className),
+         classNumeric = as.numeric(className))
+
+# Plot
+p <-
+  ggplot() +
+  facet_wrap(~ threat) +
+  geom_point(data = actionMatch_newdat,
+             aes(x = className,
+                 y = 1 - matched_action,
+                 colour = factor(iucn)),
+             position = position_dodge(width = 0.7),
+             colour = "transparent") +
+  geom_rect(data = actionMatch_newdat,
+            aes(xmin = classNumeric - 0.5, 
+                xmax = classNumeric + 0.5, 
+                ymin = -Inf, 
+                ymax = Inf, 
+                fill = className), 
+            alpha = 0.5) +
+  geom_text(data = actionMatch_newdat,
+            aes(x = className,
+                y = 1.15,
+                 label = N),
+            size = 2.5,
+            colour = "black") +
+  geom_point(data = actionMatch_newdat,
+             aes(x = className,
+                 y = 1 - matched_action,
+                 colour = factor(iucn)),
+             position = position_dodge(width = 0.7),
+             size = 1) +
+  geom_errorbar(data = actionMatch_newdat,
+                aes(x = className,
+                    ymin = 1 - CI_lo,
+                    ymax = 1 - CI_hi,
+                    colour = factor(iucn)),
+                position = position_dodge(width = 0.7),
+                width = 0,
+                size = 0.5) +
+  ylab("Probability species\nlacking appropriate intervention (%)") +
+  facet_wrap(~ threat, ncol = 1) +
+  myTheme() +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = 
+          element_text(colour = "black", 
+                       size = 10, 
+                       angle = 90, 
+                       hjust = 1, vjust = 0.5),
+        legend.margin = margin(0,0,-0.3,0, "cm"),
+        legend.position = "top") +
+  scale_colour_manual(labels = c("VU", "EN", "CR"),
+                      name = NULL,
+                      values = iucnPal) +
+  scale_fill_manual(guide = NULL,
+                    values = rep(c("grey90", "grey95"), 5)) +
+  scale_y_continuous(limits = c(0, 1.5),
+                     breaks = seq(0, 1, 0.2),
+                     labels = seq(0, 100, 20))
+
+sub_imgs <- imgs[match(tolower(unique(actionMatch_newdat$className)),names(imgs))]
+
+for (i in 1:length(sub_imgs)) {
+  x <- (1:length(sub_imgs))[i]
+  p <- p +
+      add_phylopic(img = sub_imgs[[i]], 
+                   alpha = 1, x = x, y = 1.4, ysize = 0.2)
+}
+p
+rm(threats, actions)
+ggsave(p, filename = "figs/exploratory/match_prob.png",
+       width = 8, height = 15, units = "cm", dpi = 800)
+# Write model-predicted values
+saveRDS(actionMatch_newdat,"models/main/newdat_match.Rds")
+```
+
+```{r action-matched-all}
+# Retrieve hc results for different thresholds
+results_match_hc_mod <-
+  map(results_match_hc, pluck, function(x) x$mod)
+
+# Sort data
+actionMatch_newdat_hc <-
+  lapply(1:length(results_match_hc_mod), function(i){
+    # Count species in each class
+    mod <- results_match_hc_mod[[i]]
+    classes <- as.character(mod$classes)
+    mod_df <- mod$data
+    
+    # Count species in each class considered in analysis (not NA)
+    mod_df_sum <-
+        group_by(mod_df, className) %>%
+        summarise(N = length(which(!(is.na(!!sym(names(results_match_hc_mod)[[i]]))))))
+    
+    # Probability of each action being implemented by class & IUCN status
+    newdat <-
+      expand.grid(className = classes,
+                  iucn = unique(alliucn$iucn)) %>% 
+      left_join(mod_df_sum, by = "className")
+    newdat[,c("matched_action", "se")] <- 
+      predict(results_match_hc_mod[[i]], newdata = newdat, 
+              type = "link", se.fit = TRUE)[1:2]
+    newdat <- 
+      as.data.frame(newdat) %>% 
+      mutate(CI_lo = matched_action - ci_const * se,
+             CI_hi = matched_action + ci_const * se,
+             className = factor(className,
+                                levels = sort(classes),
+                                labels = capitalise(sort(classes))),
+             threat = "threat_habitat_change") %>% 
+      mutate(matched_action = inv.logit(matched_action),
+             se = inv.logit(se),
+             CI_lo = inv.logit(CI_lo),
+             CI_hi = inv.logit(CI_hi),
+             paProp = names(results_match_hc_mod)[i])
+    # Coerce to NA when SE = 1 (i.e. no variation in response level, all values the same)
+    newdat[which(newdat$se == 1), c("se","CI_lo","CI_hi")] <- NA
+    return(newdat)
+  }) %>% 
+  bind_rows() %>% 
+  mutate(threat = factor(threat,
+                         levels = c("threat_habitat_change", 
+                                    "threat_overexploitation", 
+                                    "threat_inv_spp" ),
+                         labels = c("Habitat change", 
+                                    "Overexploitation", 
+                                    "Invasive species")),
+         className = as.factor(className),
+         classNumeric = as.numeric(className),
+         paProp = factor(paProp,
+                         levels = c("matched_hc_sps",
+                                    "matched_hc_target","matched_hc_targetRL",
+                                    paste("matched_hc_", paProps, sep = "")),
+                         labels = c("Species target (SPS)",
+                                    "Species target (w/o RL data)",
+                                    "Species target (w RL data)",
+                                    paste(paProps,"%", sep = ""))))
+
+# Plot
+p <-
+  ggplot() +
+  geom_point(data = actionMatch_newdat_hc,
+             aes(x = className,
+                 y = 1 - matched_action,
+                 colour = factor(iucn)),
+             position = position_dodge(width = 0.7),
+             colour = "transparent") +
+  geom_rect(data = actionMatch_newdat_hc,
+            aes(xmin = classNumeric - 0.5, 
+                xmax = classNumeric + 0.5, 
+                ymin = -Inf, 
+                ymax = Inf, 
+                fill = className), 
+            alpha = 0.5) +
+  geom_text(data = actionMatch_newdat_hc,
+            aes(x = className,
+                y = 1.15,
+                 label = N),
+            size = 2.5,
+            colour = "black") +
+  geom_point(data = actionMatch_newdat_hc,
+             aes(x = className,
+                 y = 1 - matched_action,
+                 colour = factor(iucn)),
+             position = position_dodge(width = 0.7),
+             size = 1) +
+  geom_errorbar(data = actionMatch_newdat_hc,
+                aes(x = className,
+                    ymin = 1 - CI_lo,
+                    ymax = 1 - CI_hi,
+                    colour = factor(iucn)),
+                position = position_dodge(width = 0.7),
+                width = 0,
+                size = 0.5) +
+  ylab("Probability species\nlacking appropriate intervention (%)") +
+  facet_wrap(~ paProp,
+             ncol = 3) +
+  myTheme() +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = 
+            element_text(colour = "black", 
+                         # size = 8,
+                         angle = 45, 
+                         hjust = 1, 
+                         vjust = 1),
+        legend.margin = margin(0,0,-0.3,0, "cm"),
+        legend.position = "top") +
+  scale_colour_manual(labels = c("VU", "EN", "CR"),
+                      name = NULL,
+                      values = iucnPal) +
+  scale_fill_manual(guide = NULL,
+                    values = rep(c("grey90", "grey95"), 5)) +
+  scale_y_continuous(limits = c(0, 1.4),
+                     breaks = seq(0, 1, 0.2),
+                     labels = seq(0, 100, 20))
+
+sub_imgs <- imgs[match(tolower(unique(actionMatch_newdat_hc$className)),names(imgs))]
+
+for (i in 1:length(sub_imgs)) {
+  x <- (1:length(sub_imgs))[i]
+  p <- p +
+      add_phylopic(img = sub_imgs[[i]], 
+                   alpha = 1, x = x, y = 1.35, ysize = 0.1)
+}
+p
+ggsave(p, filename = "figs/exploratory/match_prob_all.png",
+       width = 16.6, height = 20, units = "cm", dpi = 800)
+# Write model-predicted values
+saveRDS(actionMatch_newdat_hc,"models/main/newdat_match_all.Rds")
+```
+
+# SOM exclude unknown threat
+
+```{r action-zero-excUnknownThreat-prep}
+# What influences the probability of having zero actions?
+load("models/som/results_excUnknownThreat_zero.Rdata")
+
+# Interaction between class and IUCN significant
+results_excUnknownThreat_actionZero_inter
+# Class significant
+results_excUnknownThreat_actionZero_class
+# IUCN significant
+results_excUnknownThreat_actionZero_iucn
+
+# Function to create newdat for each threshold PA value
+newdat_actionZero_excUnknownThreat <- function(i, ci_const){
+  # Get threshold used
+  prop <- gsub("actions_zero_prop", "", i$prop)
+  mod <- i$mod
+  dat <- i$mod$data
+  
+  # Count species in each class considered in analysis (not NA)
+  mod_df_sum <-
+    group_by(dat, className) %>% 
+    summarise(N = length(which(!(is.na(!!sym(i$prop))))))
+  
+   # Determine classes included in analysis
+  classes <- mod_df_sum$className[mod_df_sum$N != 0]
+  
+  # Newdat
+  action_zero_newdat <-
+    expand.grid(className = classes,
+                iucn = unique(dat$iucn)) %>% 
+    left_join(mod_df_sum, by = "className")
+  
+  # Predict new vals
+  action_zero_newdat[,c("action_zero", "se")] <- 
+    predict(mod, newdata = action_zero_newdat, 
+            type = "link", se.fit = TRUE)[1:2]
+  action_zero_newdat <- 
+    as.data.frame(action_zero_newdat) %>% 
+    mutate(CI_lo = action_zero - ci_const * se,
+           CI_hi = action_zero + ci_const * se) %>% 
+    mutate(action_zero = inv.logit(action_zero),
+           se = inv.logit(se),
+           CI_lo = inv.logit(CI_lo),
+           CI_hi = inv.logit(CI_hi)) %>%
+    # Sort class as a factor
+    mutate(className = 
+             factor(className,
+                    levels = sort(unique(className)),
+                    labels = capitalise(sort(unique(className)))),
+           classNumeric = as.numeric(className),
+           paProp = prop)
+  # Coerce to NA when SE = 1 (i.e. no variation in response level, all values the same)
+  action_zero_newdat[which(action_zero_newdat$se == 1), c("se","CI_lo","CI_hi")] <- NA
+  
+  # Return
+  return(action_zero_newdat)
+}
+
+action_zero_newdat_excUnknownThreat <- 
+  lapply(results_excUnknownThreat_actionZero, newdat_actionZero_excUnknownThreat, ci_const)
+```
+
+```{r action-zero-excUnknownThreat-sps}
+action_zero_newdat_excUnknownThreat <- action_zero_newdat_excUnknownThreat$actions_zero_sps
+p <-
+  ggplot() +
+  geom_point(data = action_zero_newdat_excUnknownThreat,
+             aes(x = className,
+                 y = action_zero),
+             position = position_dodge(width = 0.7),
+             colour = "transparent") +
+  geom_rect(data = action_zero_newdat_excUnknownThreat,
+            aes(xmin = classNumeric - 0.5, 
+                xmax = classNumeric + 0.5, 
+                ymin = -Inf, 
+                ymax = Inf, 
+                fill = className), 
+            alpha = 0.5) +
+  geom_text(data = action_zero_newdat_excUnknownThreat,
+            aes(x = className,
+                y = 1.05,
+                 label = N),
+            size = 2.2,
+            colour = "black") +
+  geom_point(data = action_zero_newdat_excUnknownThreat,
+             aes(x = className,
+                 y = action_zero,
+                 colour = factor(iucn)),
+             position = position_dodge(width = 0.7),
+             size = 1) +
+  geom_errorbar(data = action_zero_newdat_excUnknownThreat,
+                aes(x = className,
+                    ymin = CI_lo,
+                    ymax = CI_hi,
+                    colour = factor(iucn)),
+                position = position_dodge(width = 0.7),
+                width = 0,
+                size = 0.5) +
+  ylab("Probability of zero interventions (%)")  +
+  myTheme() +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = 
+          element_text(colour = "black",
+                       angle = 90, 
+                       hjust = 1, vjust = 0.5),
+        legend.margin = margin(0,0,-0.3,0),
+        legend.position = "top") +
+  scale_colour_manual(labels = c("VU", "EN", "CR"),
+                      name = NULL,
+                      values = iucnPal) +
+  scale_fill_manual(guide = NULL,
+                    values = rep(c("grey90", "grey95"), 5)) +
+  scale_y_continuous(limits = c(0, 1.2),
+                     breaks = seq(0, 1, 0.2),
+                     labels = seq(0, 100, 20))
+
+sub_imgs <- imgs[match(tolower(unique(action_zero_newdat_excUnknownThreat$className)),names(imgs))]
+
+for (i in 1:length(sub_imgs)) {
+  x <- (1:length(sub_imgs))[i]
+  p <- p +
+      add_phylopic(img = sub_imgs[[i]], 
+                   alpha = 1, x = x, y = 1.15, ysize = 0.1)
+}
+p
+
+ggsave(p, filename = "figs/exploratory/action_zero_excUnknownThreat.png",
+       width = 8, height = 10, units = "cm", dpi = 800)
+# Write model-predicted values
+saveRDS(action_zero_newdat_excUnknownThreat,"models/som/newdat_excUnknownThreat_zero.Rds")
+```
+
+```{r action-matched-sps}
+load("models/som/results_excUnknownThreat_match.Rdata")
+
+results_excUnknownThreat_actionZero_inter
+# Interaction between class and IUCN significant for all but overexploitation
+# Class significant for all
+# IUCN significant for all but overexploitation
+
+threats <- names(results_excUnknownThreat_match_mod)
+actions <- c("matched_hc_sps", "matched_ru", "matched_is")
+
+# Sort data
+actionMatch_newdat_excUnknownThreat <-
+  lapply(1:length(results_excUnknownThreat_match_mod), function(i){
+    # Count species in each class
+    mod <- results_excUnknownThreat_match_mod[[i]]
+    mod_df <- mod$data
+    
+    # Count species in each class considered in analysis (not NA)
+    mod_df_sum <-
+        group_by(mod_df, className) %>%
+        summarise(N = length(which(!(is.na(!!sym(actions[[i]]))))))
+    
+    # Newdat
+    mod_df_sum <-
+      group_by(mod_df, className) %>% 
+      summarise(N = n())
+    
+    # Probability of each action being implemented by class & IUCN status
+    classes <- as.character(unique(results_excUnknownThreat_match_mod[[i]]$data$className))
+    newdat <-
+      expand.grid(className = classes,
+                  iucn = unique(alliucn$iucn)) %>% 
+      left_join(mod_df_sum, by = "className")
+    newdat[,c("matched_action", "se")] <- 
+      predict(results_excUnknownThreat_match_mod[[i]], newdata = newdat, 
+              type = "link", se.fit = TRUE)[1:2]
+    newdat <- 
+      as.data.frame(newdat) %>% 
+      mutate(CI_lo = matched_action - ci_const * se,
+             CI_hi = matched_action + ci_const * se,
+             className = factor(className,
+                                levels = sort(classes),
+                                labels = capitalise(sort(classes))),
+             threat = names(results_excUnknownThreat_match_mod)[i]) %>% 
+      mutate(matched_action = inv.logit(matched_action),
+             se = inv.logit(se),
+             CI_lo = inv.logit(CI_lo),
+             CI_hi = inv.logit(CI_hi))
+      # Coerce to NA when SE = 1 (i.e. no variation in response level, all values the same)
+    newdat[which(newdat$se == 1), c("se","CI_lo","CI_hi")] <- NA
+    return(newdat)
+  }) %>% 
+  bind_rows() %>% 
+  mutate(threat = factor(threat,
+                         levels = c("threat_habitat_change", 
+                                    "threat_overexploitation", 
+                                    "threat_inv_spp" ),
+                         labels = c("Habitat change", 
+                                    "Overexploitation", 
+                                    "Invasive species")),
+         className = as.factor(className),
+         classNumeric = as.numeric(className))
+
+# Plot
+p <-
+  ggplot() +
+  facet_wrap(~ threat) +
+  geom_point(data = actionMatch_newdat_excUnknownThreat,
+             aes(x = className,
+                 y = 1 - matched_action,
+                 colour = factor(iucn)),
+             position = position_dodge(width = 0.7),
+             colour = "transparent") +
+  geom_rect(data = actionMatch_newdat_excUnknownThreat,
+            aes(xmin = classNumeric - 0.5, 
+                xmax = classNumeric + 0.5, 
+                ymin = -Inf, 
+                ymax = Inf, 
+                fill = className), 
+            alpha = 0.5) +
+  geom_text(data = actionMatch_newdat_excUnknownThreat,
+            aes(x = className,
+                y = 1.15,
+                 label = N),
+            size = 2.5,
+            colour = "black") +
+  geom_point(data = actionMatch_newdat_excUnknownThreat,
+             aes(x = className,
+                 y = 1 - matched_action,
+                 colour = factor(iucn)),
+             position = position_dodge(width = 0.7),
+             size = 1) +
+  geom_errorbar(data = actionMatch_newdat_excUnknownThreat,
+                aes(x = className,
+                    ymin = 1 - CI_lo,
+                    ymax = 1 - CI_hi,
+                    colour = factor(iucn)),
+                position = position_dodge(width = 0.7),
+                width = 0,
+                size = 0.5) +
+  ylab("Probability species\nlacking appropriate intervention (%)") +
+  facet_wrap(~ threat, ncol = 1) +
+  myTheme() +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = 
+          element_text(colour = "black", 
+                       size = 10, 
+                       angle = 90, 
+                       hjust = 1, vjust = 0.5),
+        legend.margin = margin(0,0,-0.3,0, "cm"),
+        legend.position = "top") +
+  scale_colour_manual(labels = c("VU", "EN", "CR"),
+                      name = NULL,
+                      values = iucnPal) +
+  scale_fill_manual(guide = NULL,
+                    values = rep(c("grey90", "grey95"), 5)) +
+  scale_y_continuous(limits = c(0, 1.5),
+                     breaks = seq(0, 1, 0.2),
+                     labels = seq(0, 100, 20))
+
+sub_imgs <- imgs[match(tolower(sort(unique(actionMatch_newdat_excUnknownThreat$className))),names(imgs))]
+
+for (i in 1:length(sub_imgs)) {
+  x <- (1:length(sub_imgs))[i]
+  p <- p +
+      add_phylopic(img = sub_imgs[[i]], 
+                   alpha = 1, x = x, y = 1.4, ysize = 0.1)
+}
+rm(threats, actions)
+
+ggsave(p, filename = "figs/exploratory/match_prob_excUnknownThreat.png",
+       width = 8, height = 15, units = "cm", dpi = 800)
+# Write model-predicted values
+saveRDS(actionMatch_newdat_excUnknownThreat,"models/som/newdat_excUnknownThreat_match.Rds")
+```
+
+# SOM exclude possibly extinct
+
+```{r action-zero-excPE-prep}
+# What influences the probability of having zero actions?
+load("models/som/results_excPE_zero.Rdata")
+
+# Interaction between class and IUCN significant
+# Class significant
+# IUCN significant
+
+# Function to create newdat for each threshold PA value
+newdat_actionZero_excPE <- function(i, ci_const){
+  # Get threshold used
+  prop <- gsub("actions_zero_prop", "", i$prop)
+  mod <- i$mod
+  dat <- i$mod$data
+  
+  # Count species in each class considered in analysis (not NA)
+  mod_df_sum <-
+    group_by(dat, className) %>% 
+    summarise(N = length(which(!(is.na(!!sym(i$prop))))))
+  
+   # Determine classes included in analysis
+  classes <- mod_df_sum$className[mod_df_sum$N != 0]
+  
+  # Newdat
+  action_zero_newdat <-
+    expand.grid(className = classes,
+                iucn = unique(dat$iucn)) %>% 
+    left_join(mod_df_sum, by = "className")
+  
+  # Predict new vals
+  action_zero_newdat[,c("action_zero", "se")] <- 
+    predict(mod, newdata = action_zero_newdat, 
+            type = "link", se.fit = TRUE)[1:2]
+  action_zero_newdat <- 
+    as.data.frame(action_zero_newdat) %>% 
+    mutate(CI_lo = action_zero - ci_const * se,
+           CI_hi = action_zero + ci_const * se) %>% 
+    mutate(action_zero = inv.logit(action_zero),
+           se = inv.logit(se),
+           CI_lo = inv.logit(CI_lo),
+           CI_hi = inv.logit(CI_hi)) %>%
+    # Sort class as a factor
+    mutate(className = 
+             factor(className,
+                    levels = sort(unique(className)),
+                    labels = capitalise(sort(unique(className)))),
+           classNumeric = as.numeric(className),
+           paProp = prop)
+  # Coerce to NA when SE = 1 (i.e. no variation in response level, all values the same)
+  action_zero_newdat[which(action_zero_newdat$se == 1), c("se","CI_lo","CI_hi")] <- NA
+  
+  # Return
+  return(action_zero_newdat)
+}
+
+action_zero_newdat_excPE <- 
+  lapply(results_excPE_actionZero, newdat_actionZero_excPE, ci_const)
+```
+
+```{r action-zero-excPE-sps}
+action_zero_newdat_excPE <- action_zero_newdat_excPE$actions_zero_sps
+p <-
+  ggplot() +
+  geom_point(data = action_zero_newdat_excPE,
+             aes(x = className,
+                 y = action_zero),
+             position = position_dodge(width = 0.7),
+             colour = "transparent") +
+  geom_rect(data = action_zero_newdat_excPE,
+            aes(xmin = classNumeric - 0.5, 
+                xmax = classNumeric + 0.5, 
+                ymin = -Inf, 
+                ymax = Inf, 
+                fill = className), 
+            alpha = 0.5) +
+  geom_text(data = action_zero_newdat_excPE,
+            aes(x = className,
+                y = 1.05,
+                 label = N),
+            size = 2.2,
+            colour = "black") +
+  geom_point(data = action_zero_newdat_excPE,
+             aes(x = className,
+                 y = action_zero,
+                 colour = factor(iucn)),
+             position = position_dodge(width = 0.7),
+             size = 1) +
+  geom_errorbar(data = action_zero_newdat_excPE,
+                aes(x = className,
+                    ymin = CI_lo,
+                    ymax = CI_hi,
+                    colour = factor(iucn)),
+                position = position_dodge(width = 0.7),
+                width = 0,
+                size = 0.5) +
+  ylab("Probability of zero interventions (%)")  +
+  myTheme() +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = 
+          element_text(colour = "black",
+                       angle = 90, 
+                       hjust = 1, vjust = 0.5),
+        legend.margin = margin(0,0,-0.3,0),
+        legend.position = "top") +
+  scale_colour_manual(labels = c("VU", "EN", "CR"),
+                      name = NULL,
+                      values = iucnPal) +
+  scale_fill_manual(guide = NULL,
+                    values = rep(c("grey90", "grey95"), 5)) +
+  scale_y_continuous(limits = c(0, 1.2),
+                     breaks = seq(0, 1, 0.2),
+                     labels = seq(0, 100, 20))
+
+sub_imgs <- imgs[match(tolower(unique(action_zero_newdat_excPE$className)),names(imgs))]
+
+for (i in 1:length(sub_imgs)) {
+  x <- (1:length(sub_imgs))[i]
+  p <- p +
+      add_phylopic(img = sub_imgs[[i]], 
+                   alpha = 1, x = x, y = 1.15, ysize = 0.1)
+}
+p
+
+ggsave(p, filename = "figs/exploratory/action_zero_excPE.png",
+       width = 8, height = 10, units = "cm", dpi = 800)
+# Write model-predicted values
+saveRDS(action_zero_newdat_excPE,"models/som/newdat_excPE_zero.Rds")
+```
+
+```{r action-matched-sps}
+load("models/som/results_excPE_match.Rdata")
+
+# Interaction between class and IUCN significant for all but overexploitation
+# Class significant for all
+# IUCN significant for all but overexploitation
+
+threats <- names(results_excPE_match_mod)
+actions <- c("matched_hc_sps", "matched_ru", "matched_is")
+
+# Sort data
+actionMatch_newdat_excPE <-
+  lapply(1:length(results_excPE_match_mod), function(i){
+    # Count species in each class
+    mod <- results_excPE_match_mod[[i]]
+    mod_df <- mod$data
+    
+    # Count species in each class considered in analysis (not NA)
+    mod_df_sum <-
+        group_by(mod_df, className) %>%
+        summarise(N = length(which(!(is.na(!!sym(actions[[i]]))))))
+    
+    # Newdat
+    mod_df_sum <-
+      group_by(mod_df, className) %>% 
+      summarise(N = n())
+    
+    # Probability of each action being implemented by class & IUCN status
+    classes <- as.character(unique(results_excPE_match_mod[[i]]$data$className))
+    newdat <-
+      expand.grid(className = classes,
+                  iucn = unique(alliucn$iucn)) %>% 
+      left_join(mod_df_sum, by = "className")
+    newdat[,c("matched_action", "se")] <- 
+      predict(results_excPE_match_mod[[i]], newdata = newdat, 
+              type = "link", se.fit = TRUE)[1:2]
+    newdat <- 
+      as.data.frame(newdat) %>% 
+      mutate(CI_lo = matched_action - ci_const * se,
+             CI_hi = matched_action + ci_const * se,
+             className = factor(className,
+                                levels = sort(classes),
+                                labels = capitalise(sort(classes))),
+             threat = names(results_excPE_match_mod)[i]) %>% 
+      mutate(matched_action = inv.logit(matched_action),
+             se = inv.logit(se),
+             CI_lo = inv.logit(CI_lo),
+             CI_hi = inv.logit(CI_hi))
+      # Coerce to NA when SE = 1 (i.e. no variation in response level, all values the same)
+    newdat[which(newdat$se == 1), c("se","CI_lo","CI_hi")] <- NA
+    return(newdat)
+  }) %>% 
+  bind_rows() %>% 
+  mutate(threat = factor(threat,
+                         levels = c("threat_habitat_change", 
+                                    "threat_overexploitation", 
+                                    "threat_inv_spp" ),
+                         labels = c("Habitat change", 
+                                    "Overexploitation", 
+                                    "Invasive species")),
+         className = as.factor(className),
+         classNumeric = as.numeric(className))
+
+# Plot
+p <-
+  ggplot() +
+  facet_wrap(~ threat) +
+  geom_point(data = actionMatch_newdat_excPE,
+             aes(x = className,
+                 y = 1 - matched_action,
+                 colour = factor(iucn)),
+             position = position_dodge(width = 0.7),
+             colour = "transparent") +
+  geom_rect(data = actionMatch_newdat_excPE,
+            aes(xmin = classNumeric - 0.5, 
+                xmax = classNumeric + 0.5, 
+                ymin = -Inf, 
+                ymax = Inf, 
+                fill = className), 
+            alpha = 0.5) +
+  geom_text(data = actionMatch_newdat_excPE,
+            aes(x = className,
+                y = 1.15,
+                 label = N),
+            size = 2.5,
+            colour = "black") +
+  geom_point(data = actionMatch_newdat_excPE,
+             aes(x = className,
+                 y = 1 - matched_action,
+                 colour = factor(iucn)),
+             position = position_dodge(width = 0.7),
+             size = 1) +
+  geom_errorbar(data = actionMatch_newdat_excPE,
+                aes(x = className,
+                    ymin = 1 - CI_lo,
+                    ymax = 1 - CI_hi,
+                    colour = factor(iucn)),
+                position = position_dodge(width = 0.7),
+                width = 0,
+                size = 0.5) +
+  ylab("Probability species\nlacking appropriate intervention (%)") +
+  facet_wrap(~ threat, ncol = 1) +
+  myTheme() +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = 
+          element_text(colour = "black", 
+                       size = 10, 
+                       angle = 90, 
+                       hjust = 1, vjust = 0.5),
+        legend.margin = margin(0,0,-0.3,0, "cm"),
+        legend.position = "top") +
+  scale_colour_manual(labels = c("VU", "EN", "CR"),
+                      name = NULL,
+                      values = iucnPal) +
+  scale_fill_manual(guide = NULL,
+                    values = rep(c("grey90", "grey95"), 5)) +
+  scale_y_continuous(limits = c(0, 1.5),
+                     breaks = seq(0, 1, 0.2),
+                     labels = seq(0, 100, 20))
+
+sub_imgs <- imgs[match(tolower(sort(unique(actionMatch_newdat_excPE$className))),names(imgs))]
+
+for (i in 1:length(sub_imgs)) {
+  x <- (1:length(sub_imgs))[i]
+  p <- p +
+      add_phylopic(img = sub_imgs[[i]], 
+                   alpha = 1, x = x, y = 1.4, ysize = 0.1)
+}
+rm(threats, actions)
+
+ggsave(p, filename = "figs/exploratory/match_prob_excPE.png",
+       width = 8, height = 15, units = "cm", dpi = 800)
+# Write model-predicted values
+saveRDS(actionMatch_newdat_excPE,"models/som/newdat_excPE_match.Rds")
+```
+
+# Results summary
+
+```{r write}
+newdat_names <- ls()[grepl("newdat", ls())]
+all_newdat <- lapply(newdat_names, function(x) eval(parse(text = x)))
+names(all_newdat) <- newdat_names
+save(all_newdat, file = "models/main/newdat_all.Rdata")
+```
+
+# Schematic diagram
+
+```{r eval = FALSE}
+grViz("digraph flowchart {
+      # node definitions with substituted label text
+      node [fontname = Helvetica, shape = rounded, style = filled, color = grey]
+      bgcolor = transparent
+      tab1 [label = '@@1']
+      
+      node [fontname = Helvetica, shape = rounded, style = filled, color = '#b2182b99']
+      tab3 [label = '@@3']
+      
+      node [fontname = Helvetica, shape = rounded, style = filled, color = '#2166ac99']
+      tab2 [label = '@@2']
+
+      # edge definitions with the node IDs
+      tab1 -> tab2 [label=' yes', fontname = Helvetica, fontsize = 10];
+      tab1 -> tab3 [label=' no', fontname = Helvetica, fontsize = 10]
+      }
+
+      [1]: 'Use SPS to determine if habitat protection exceeds target threshold'
+      [2]: 'Intervention is in place'
+      [3]: 'Intervention is not in place'
+      ") %>% 
+  DiagrammeRsvg::export_svg() %>%
+  charToRaw() %>%
+  rsvg::rsvg_png("figs/exploratory/schematic_a.png")
+
+grViz("digraph flowchart {
+      # node definitions with substituted label text
+      node [fontname = Helvetica, shape = rounded, style = filled, color = grey]
+      bgcolor = transparent
+      tab1 [label = '@@1']
+      tab3 [label = '@@3']
+      tab4 [label = '@@4']
+      tab5 [label = '@@5']
+      
+      node [fontname = Helvetica, shape = rounded, style = filled, color = '#2166ac99']
+      tab2 [label = '@@2']
+      
+      node [fontname = Helvetica, shape = rounded, style = filled, color = '#b2182b99']
+      tab6 [label = '@@6']
+
+      # edge definitions with the node IDs
+      tab1 -> tab2 [label=' yes', fontname = Helvetica, fontsize = 10];
+      tab1 -> tab3 [label=' no', fontname = Helvetica, fontsize = 10];
+      tab3 -> tab2 [label=' yes', fontname = Helvetica, fontsize = 10];
+      tab3 -> tab4 [label=' no', fontname = Helvetica, fontsize = 10];
+      tab4 -> tab2 [label=' yes', fontname = Helvetica, fontsize = 10];
+      tab4 -> tab5 [label=' no', fontname = Helvetica, fontsize = 10];
+      tab5 -> tab2 [label=' yes', fontname = Helvetica, fontsize = 10];
+      tab5 -> tab6 [label=' no', fontname = Helvetica, fontsize = 10]
+      }
+
+      [1]: 'Red List records the conservation intervention as in place in downloaded tabular data'
+      [2]: 'Intervention is in place'
+      [3]: 'Red List records the conservation intervention as in place in downloaded text description'
+      [4]: 'Calculate overlap between HSR and PAs to determine if it exceeds target threshold'
+      [5]: 'GBIF point occurrence data from last 5 years fall within PA(s)'
+      [6]: 'Intervention is not in place'
+      ") %>% 
+  DiagrammeRsvg::export_svg() %>%
+  charToRaw() %>%
+  rsvg::rsvg_png("figs/exploratory/schematic_b.png")
+
+grViz("digraph flowchart {
+      # node definitions with substituted label text
+      node [fontname = Helvetica, shape = rounded, style = filled, color = grey]
+      bgcolor = transparent
+      tab1 [label = '@@1']
+      
+      node [fontname = Helvetica, shape = rounded, style = filled, color = '#b2182b99']
+      tab3 [label = '@@3']
+      
+      node [fontname = Helvetica, shape = rounded, style = filled, color = '#2166ac99']
+      tab2 [label = '@@2']
+
+      # edge definitions with the node IDs
+      tab1 -> tab2 [label=' yes', fontname = Helvetica, fontsize = 10];
+      tab1 -> tab3 [label=' no', fontname = Helvetica, fontsize = 10]
+      }
+
+      [1]: 'Calculate overlap between HSR and PAs to determine if it exceeds target threshold'
+      [2]: 'Intervention is in place'
+      [3]: 'Intervention is not in place'
+      ") %>% 
+  DiagrammeRsvg::export_svg() %>%
+  charToRaw() %>%
+  rsvg::rsvg_png("figs/exploratory/schematic_c.png")
+
+grViz("digraph flowchart {
+      # node definitions with substituted label text
+      node [fontname = Helvetica, shape = rounded, style = filled, color = grey]
+      bgcolor = transparent
+      tab1 [label = '@@1']
+      tab3 [label = '@@3']
+      tab4 [label = '@@4']
+
+      node [fontname = Helvetica, shape = rounded, style = filled, color = '#2166ac99']
+      tab2 [label = '@@2']
+      
+      node [fontname = Helvetica, shape = rounded, style = filled, color = '#b2182b99']
+      tab5 [label = '@@5']
+
+      # edge definitions with the node IDs
+      tab1 -> tab2 [label=' yes', fontname = Helvetica, fontsize = 10];
+      tab1 -> tab3 [label=' no', fontname = Helvetica, fontsize = 10];
+      tab3 -> tab2 [label=' yes', fontname = Helvetica, fontsize = 10];
+      tab3 -> tab4 [label=' no', fontname = Helvetica, fontsize = 10];
+      tab4 -> tab2 [label=' yes', fontname = Helvetica, fontsize = 10];
+      tab4 -> tab5 [label=' no', fontname = Helvetica, fontsize = 10]
+      }
+
+      [1]: 'Red List records the conservation intervention as in place in downloaded tabular data'
+      [2]: 'Intervention is in place'
+      [3]: 'Red List records the conservation intervention as in place in downloaded text description'
+      [4]: 'Species is listed on Appendices I, II, or II of CITES'
+      [5]: 'Intervention is not in place'
+      ") %>% 
+  DiagrammeRsvg::export_svg() %>%
+  charToRaw() %>%
+  rsvg::rsvg_png("figs/exploratory/schematic_d.png")
+
+grViz("digraph flowchart {
+      # node definitions with substituted label text
+      node [fontname = Helvetica, shape = rounded, style = filled, color = grey]
+      bgcolor = transparent
+      tab1 [label = '@@1']
+      tab3 [label = '@@3']
+      tab4 [label = '@@4']
+      tab5 [label = '@@5']
+
+      node [fontname = Helvetica, shape = rounded, style = filled, color = '#2166ac99']
+      tab2 [label = '@@2']
+      
+      node [fontname = Helvetica, shape = rounded, style = filled, color = '#b2182b99']
+      tab6 [label = '@@6']
+
+      # edge definitions with the node IDs
+      tab1 -> tab2 [label=' yes', fontname = Helvetica, fontsize = 10];
+      tab1 -> tab3 [label=' no', fontname = Helvetica, fontsize = 10];
+      tab3 -> tab2 [label=' yes', fontname = Helvetica, fontsize = 10];
+      tab3 -> tab4 [label=' no', fontname = Helvetica, fontsize = 10];
+      tab4 -> tab2 [label=' yes', fontname = Helvetica, fontsize = 10];
+      tab4 -> tab5 [label=' no', fontname = Helvetica, fontsize = 10];
+      tab5 -> tab2 [label=' yes', fontname = Helvetica, fontsize = 10];
+      tab5 -> tab6 [label=' no', fontname = Helvetica, fontsize = 10]
+      }
+
+      [1]: 'Red List records the conservation intervention as in place in downloaded tabular data'
+      [2]: 'Intervention is in place'
+      [3]: 'Red List records the conservation intervention as in place in downloaded text description'
+      [4]: 'Listed on any of the appendices of CITES or CMS, or in the Annexes to the EU Wildlife Trade Regulations'
+      [5]: 'Described in Red List text description as protected by a named multilateral agreement (Table S3)'
+      [6]: 'Intervention is not in place'
+      ") %>% 
+  DiagrammeRsvg::export_svg() %>%
+  charToRaw() %>%
+  rsvg::rsvg_png("figs/exploratory/schematic_e.png")
+
+grViz("digraph flowchart {
+      # node definitions with substituted label text
+      node [fontname = Helvetica, shape = rounded, style = filled, color = grey]
+      bgcolor = transparent
+      tab1 [label = '@@1']
+      tab3 [label = '@@3']
+      tab4 [label = '@@4']
+
+      node [fontname = Helvetica, shape = rounded, style = filled, color = '#2166ac99']
+      tab2 [label = '@@2']
+      
+      node [fontname = Helvetica, shape = rounded, style = filled, color = '#b2182b99']
+      tab5 [label = '@@5']
+
+      # edge definitions with the node IDs
+      tab1 -> tab2 [label=' yes', fontname = Helvetica, fontsize = 10];
+      tab1 -> tab3 [label=' no', fontname = Helvetica, fontsize = 10];
+      tab3 -> tab2 [label=' yes', fontname = Helvetica, fontsize = 10];
+      tab3 -> tab4 [label=' no', fontname = Helvetica, fontsize = 10];
+      tab4 -> tab2 [label=' yes', fontname = Helvetica, fontsize = 10];
+      tab4 -> tab5 [label=' no', fontname = Helvetica, fontsize = 10]
+      }
+
+      [1]: 'Red List records the conservation intervention as in place in downloaded tabular data'
+      [2]: 'Intervention is in place'
+      [3]: 'Red List records the conservation intervention as in place in downloaded text description'
+      [4]: 'Overlap between range and island from which named invasive species has been successfully eradicated'
+      [5]: 'Intervention is not in place'
+      ") %>% 
+  DiagrammeRsvg::export_svg() %>%
+  charToRaw() %>%
+  rsvg::rsvg_png("figs/exploratory/schematic_f.png")
+```
+

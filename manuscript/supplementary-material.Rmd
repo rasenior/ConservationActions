@@ -1,0 +1,1826 @@
+---
+title: "Global shortfalls in documented conservation action"
+subtitle: 'Supplementary Information'
+output:
+    bookdown::pdf_document2:
+        toc: no
+        latex_engine: xelatex
+        fig_caption: yes
+        keep_tex: yes
+        includes:
+            in_header: header.tex 
+    bookdown::word_document2:
+        reference_docx: ms_general.docx
+    bookdown::html_document2:
+        toc: no
+fontsize: 12pt
+geometry: margin=2.5cm
+lang: en-GB
+papersize: a4
+documentclass: article
+link-citations: yes
+csl: "elsevier-harvard.csl"
+biblio-style: apalike
+bibliography: [refs.bib, funky-refs.bib, pckgs.bib]
+---
+
+```{r setup, include=FALSE}
+# knitr::opts_knit$set(root.dir = "../../../")
+knitr::opts_chunk$set(echo = FALSE, message = FALSE,error = FALSE, warning = FALSE,
+                      dpi = 300, fig.path = "figs/som/",  
+                      fig.align = "center", fig.pos = 'H',
+                      fig.width = 16.6/2.54, fig.height = 15/2.54)
+```
+
+```{r packages}
+# Package names
+packages <-  c(
+    "knitr","kableExtra", # rmarkdown
+    "dplyr", "tidyr", # Data wrangling
+    "sf", "png", # Loading data
+    "ggplot2", # Plotting
+    "grid",
+    "gridExtra",
+    "scales",
+    "RColorBrewer",
+    "cowplot",
+    "egg",
+    "rphylopic")
+
+# Install packages not yet installed
+installed_packages <- packages %in% rownames(installed.packages())
+if (any(installed_packages == FALSE)) {
+    install.packages(packages[!installed_packages])
+}
+
+# Packages loading
+invisible(lapply(packages, library, character.only = TRUE))
+```
+
+```{r functions}
+# Plotting parameters
+options(scipen=99)
+myTheme <- function(base_size = 12, base_family = "") 
+{
+  theme_bw(base_size = base_size, base_family = base_family) %+replace% 
+    theme(axis.text = element_text(size = 8, 
+                                   colour = "black"),
+          axis.title = element_text(size = 10, 
+                                    vjust = 1, 
+                                    face = "bold"),
+          legend.text = element_text(size = 8, 
+                                   colour = "black"),
+          legend.title = element_text(size = 10),
+          strip.text = element_text(size = 10,
+                                    margin = margin(0.1,0.1,0.1,0.1, "cm")),
+          strip.background = element_blank(),
+          panel.grid = element_blank())
+}
+
+# Define function to capitalise first letter
+capitalise <- function(string) {
+  substr(string, 1, 1) <- toupper(substr(string, 1, 1))
+  string
+}
+
+# A function factory for getting integer y-axis values.
+integer_breaks <- function(n = 5, ...) {
+fxn <- function(x) {
+breaks <- floor(pretty(x, n, ...))
+names(breaks) <- attr(breaks, "labels")
+breaks
+}
+return(fxn)
+}
+
+# Function to calculate inverse logit
+inv.logit <- function(x) exp(x)/(1 + exp(x))
+
+# Function to calculate critical significance value
+ci.critical <- 
+  function(siglevel) qnorm((100 - siglevel) / 100 / 2, lower.tail = FALSE)
+ci_const = ci.critical(95)
+
+# Function to make significance levels pretty
+siglevel <- function(pval){
+  ifelse(pval < 0.001, "P < 0.001",
+         ifelse(pval < 0.05, 
+                paste("P = ", signif(pval, 2), sep = ""),
+                "P > 0.05 ")
+  )
+}
+```
+
+```{r data}
+# Main data
+alliucn <- readRDS("data/analysis/main/all_iucn_prepped.Rds")
+
+# Other useful things
+verts <- c("amphibia", "aves", "mammalia")
+matched_threats <- c("threat_habitat_change", "threat_resource_use", "threat_inv_spp" )
+matched_actions <- c("matched_hc_sps", "matched_ru", "matched_is")
+paProps <- c(1,5,10,25,50,75,90,95,99)
+```
+
+```{r spatial-data}
+# Country spatial data
+country_polys <- readRDS("data/country/countries.Rds")
+continent <-
+    read.csv("data/country/continent_codes.csv") %>%
+  dplyr::select(Continent_Name, Three_Letter_Country_Code)
+
+# Model data
+newdat_zero_country <- readRDS("models/main/newdat_zero_country.Rds")
+```
+
+```{r sort-data}
+# Spatial endemics -------------------------------------------------------------
+endemic_country <-
+  alliucn %>% 
+  filter(
+    !(is.na(countries_MOL_all)),
+    !(grepl(";", countries_MOL_all))) %>% 
+  dplyr::select(scientificName, className, countries_MOL_all, actions_zero_sps) %>% 
+  separate_rows(countries_MOL_all, sep = ";") %>% 
+  rename(country = countries_MOL_all)
+endemic_country_sum <-
+    endemic_country %>% 
+    group_by(country) %>% 
+    summarise(actions_zero = sum(actions_zero_sps, na.rm = TRUE),
+              actions_nonzero = sum(!(actions_zero_sps), na.rm = TRUE),
+              n = actions_zero + actions_nonzero)
+
+# Sum threatened endemic species by country
+ctry_threatspp <-
+  group_by(endemic_country, country) %>% 
+  summarise(n = n())
+
+# Join to spatial data
+endemic_country <-
+  left_join(country_polys, endemic_country, by = c("COUNTRY" = "country")) %>% 
+  rename("country" = "COUNTRY")
+
+# Threat presence/absence ------------------------------------------------------
+alliucn_threats <-
+  gather(alliucn, key = "threat", value = "threat_present", 
+         starts_with("threat_"), -"threat_count") %>% 
+    # Relevel
+    mutate(threat = factor(threat,
+                           levels = c("threat_habitat_change",
+                                      "threat_resource_use", 
+                                      "threat_inv_spp", 
+                                      "threat_pollution",
+                                      "threat_climate_change",
+                                      "threat_other")),
+           className =  factor(className,
+                               levels = sort(unique(className)))) %>% 
+  # Drop NAs
+  filter(!(is.na(threat_present))) %>% 
+  dplyr::select(scientificName, className, countries_MOL_all,
+                iucn, ED, EDGE.Rank,cat_change_bi,
+                threat, threat_present, threat_count, 
+                starts_with("matched_"), 
+                starts_with("action_count_"))
+
+# EDGE -------------------------------------------------------------------------
+alliucn_EDGE <-
+  alliucn %>% 
+  filter(className %in% c("amphibia","aves","mammalia"),
+         !(is.na(ED))) %>%  
+  mutate(EDGE = case_when(is.na(EDGE.Rank) ~ FALSE,
+                          !(is.na(EDGE.Rank)) ~ TRUE),
+         ED = as.numeric(ED)) %>% 
+  dplyr::select(scientificName, className, iucn, EDGE, ED, actions_zero_sps) %>% 
+  # Standardise ED within taxonomic class to make comparable between classes
+  group_by(className) %>% 
+  reframe(ED_max = max(ED),
+            ED_min = min(ED),
+            ED_stand = ED / max(ED),
+            scientificName = scientificName, 
+            iucn = iucn, 
+            EDGE = EDGE, 
+            ED = ED, 
+            actions_zero_sps = actions_zero_sps)
+
+# Matched action presence/absence -----------------------------------------------
+alliucn_matched <- 
+  alliucn_threats %>% 
+  filter(
+    # Threat is present
+    threat_present == 1,
+    # Threat is  habitat change/resource use/invasive species
+    threat %in% matched_threats
+    ) %>% 
+  # Relevel
+  mutate(threat = factor(threat,
+                         levels = c("threat_habitat_change",
+                                    "threat_resource_use",
+                                    "threat_inv_spp"),
+                         labels = c("threat_habitat_change",
+                                    "threat_overexploitation",
+                                    "threat_inv_spp")))
+endemic_country_matched <- 
+  left_join(alliucn_matched, dplyr::select(endemic_country, - className), 
+            by = "scientificName") %>% 
+  filter(!(is.na(country)))
+
+# Status change ----------------------------------------------------------------
+statchange <- readRDS("data/analysis/main/status_change_prepped.Rds")
+
+statchange_matched <-
+  # Gather threats
+  gather(statchange, key = "threat", value = "threat_present", 
+         starts_with("threat_"), -"threat_count") %>% 
+  filter(
+    # Only considering habitat change/resource use/invasive species
+    threat %in% matched_threats,
+    # Threat is present
+    threat_present == 1,
+    # Only one major threat
+    threat_count <= 1
+    ) %>% 
+  # Relevel
+  mutate(rangeArTot = as.numeric(rangeArTot),
+         LogRangeArea = log(rangeArTot)) %>% 
+  dplyr::select(scientificName, className, familyName, 
+                threat, threat_count, 
+                cat_old_cat, change_reason, cat_change_bi,
+                LogBodyMass, iucn, islandSp_95, 
+                starts_with("matched_action_"), starts_with("action_count_"))
+
+# Bind to status change
+statchange_sum <- 
+  statchange %>% 
+  dplyr::select(scientificName, className, countries_MOL_all, cat_change_bi) %>% 
+  separate_rows(countries_MOL_all, sep = ";") %>% 
+  rename("country" = "countries_MOL_all") %>% 
+  # Count species in each country
+  group_by(country) %>% 
+  # Count species
+  summarise(improve = sum(cat_change_bi == 1),
+            decline = sum(cat_change_bi == 0),
+            diff = improve - decline,
+            n = n())
+
+# Join to spatial data
+statchange_country <-
+  left_join(country_polys, statchange_sum, by = c("COUNTRY" = "country")) %>% 
+  rename("country" = "COUNTRY")
+```
+
+```{r plotting-params}
+imgs <- readRDS("figs/phylopic/phylopics.Rds")
+
+# Lookups
+class_lookup <- capitalise(sort(unique(alliucn$className)))
+names(class_lookup) <- sort(unique(alliucn$className))
+action_lookup <- c("Habitat change", "Overexploitation", "Invasive species")
+names(action_lookup) <- matched_actions
+threat_lookup <- action_lookup
+names(threat_lookup) <- matched_threats
+iucn_lookup <- c("Vulnerable", "Endangered", "Critically Endangered")
+names(iucn_lookup) <- sort(unique(alliucn$iucn))
+threat_lookup_orig <- c(
+  threat_habitat_change = "Habitat change",
+  threat_overexploitation = "Overexploitation",
+  threat_inv_spp = "Invasive species"
+)
+
+# Palettes
+propPal <- colorRampPalette(brewer.pal(9, "Greens"))(15)
+iucnPal <- RColorBrewer::brewer.pal(9, "YlOrRd")[c(4,6,8)]
+goodpal <- RColorBrewer::brewer.pal(9, "YlGnBu")[3:9]
+badpal <- RColorBrewer::brewer.pal(9, "YlOrRd")[3:9]
+
+# Other
+ci_const <- ci.critical(95)
+paProps <- c(1,5,10,25,50,75,90,95,99)
+```
+
+```{r action-zero-prep}
+# Sort data
+actions_zero_props <- names(alliucn)[grep("actions_zero_",names(alliucn))]
+
+zero_action_sum <- 
+  lapply(actions_zero_props, function(prop){
+    alliucn %>% 
+      group_by(className, iucn) %>% 
+      summarise(N = length(which(!(is.na(!!sym(prop))))),
+                nT = sum(!!sym(prop), na.rm = TRUE)) %>% 
+      mutate(className = factor(className,
+                                levels = names(class_lookup),
+                                labels = class_lookup),
+             classNumeric = as.numeric(className),
+             paProp = prop)
+  })
+zero_action_sum <-
+  lapply(zero_action_sum, function(i){
+    i %>% 
+      left_join(group_by(i, className) %>% 
+                  summarise(classN = sum(N)),
+                by = "className") %>% 
+    filter(classN != 0)
+  }) 
+names(zero_action_sum) <- actions_zero_props
+```
+
+```{r action-matched-prep}
+matched_actions_all <- names(alliucn)[grep("matched_",names(alliucn))]
+
+# Sort data
+matched_action_sum <- 
+    lapply(matched_actions_all, function(i){
+        # Identify threat from matched action i
+        threat <- ifelse(grepl("_hc_",i), "threat_habitat_change",
+                         ifelse(grepl("_ru",i), "threat_overexploitation",
+                                ifelse(grepl("_is",i), "threat_inv_spp",
+                                       NA)))
+        result <- 
+            # Filter to this threat only
+            alliucn_matched[alliucn_matched$threat == threat,] %>%
+            # Group by taxonomic class & RL category 
+            group_by(className, iucn, .drop = FALSE) %>% 
+            summarise(
+                # Count all species considered (i.e. not NA)
+                N = length(which(!(is.na(!!sym(i))))),
+                # Count species with matched action
+                nT = sum(!!sym(i), na.rm = TRUE)
+            ) %>%
+            ungroup() %>% 
+            complete(className,
+                     iucn,
+                     fill = list(N = NA, nT = NA)) %>%
+            filter(!(is.na(iucn))) %>% 
+            mutate(threat = threat,
+                   matched_action = i,
+                   className = factor(className,
+                                      levels = names(class_lookup),
+                                      labels = class_lookup),
+                   classNumeric = as.numeric(className)
+            )
+        return(result)
+    }) %>% 
+    bind_rows()
+
+# How many species assessed in each class and threat
+matched_action_sum_sum <-
+    matched_action_sum %>% 
+    group_by(threat,matched_action,className) %>% 
+    summarise(classN = sum(N, na.rm = TRUE))
+
+# Join
+matched_action_sum <- 
+    left_join(matched_action_sum, matched_action_sum_sum, 
+              by = c("threat","matched_action","className")) %>% 
+    mutate(
+        threat = factor(threat,
+                        levels = c("threat_habitat_change",
+                                   "threat_overexploitation",
+                                   "threat_inv_spp"),
+                        labels = threat_lookup),
+        matched_action = factor(matched_action,
+                                levels = c("matched_hc_sps",
+                                           "matched_hc_target", "matched_hc_targetRL",
+                                           paste("matched_hc_",paProps, sep = ""),
+                                           "matched_ru","matched_is"))
+    )
+rm(matched_action_sum_sum)
+```
+
+```{r model-results}
+# Results
+load("models/main/results_match.Rdata")
+load("models/main/results_zero.Rdata")
+load("models/main/results_zero_country.Rdata")
+load("models/main/results_zeroProb_country.Rdata")
+
+# Newdat
+load("models/main/newdat_all.Rdata")
+```
+
+```{r threat-lookup}
+threat_lookup <- c("Habitat loss", "International trade", "Invasive species")
+names(threat_lookup) <- levels(all_newdat$actionMatch_newdat$threat)
+```
+
+```{r statchange-sum}
+# All status changes
+statchange_sum <-
+  statchange %>% 
+  mutate(cat_change_bi = factor(cat_change_bi)) %>% 
+  group_by(className, cat_change_bi, .drop = FALSE) %>% 
+  summarise(n = n())
+statchangespp <- unique(statchange$scientificName)
+
+# HC
+statchange_match_hc_sum <-
+  alliucn_matched %>% 
+  filter(!(is.na(cat_change_bi)),
+         scientificName %in% statchangespp,
+         threat == "threat_habitat_change") %>% 
+  mutate(matched_hc_sps = factor(matched_hc_sps)) %>% 
+  group_by(className, matched_hc_sps, .drop = FALSE) %>% 
+ summarise(n_improve = length(which(cat_change_bi == 1)),
+            n_decline = length(which(cat_change_bi == 0)),
+            n = n(),
+            prop_decline = n_decline / n,
+           ratio_improve = n_improve / n_decline) %>% 
+  filter(className %in% c("amphibia","aves","magnoliopsida","mammalia","pinopsida")) %>% 
+  mutate(matched_hc_sps = factor(matched_hc_sps, levels = c(1,0)),
+         matched_action = "threat_habitat_change") %>% 
+  rename("value" = "matched_hc_sps")
+
+# RU
+statchange_match_ru_sum <-
+  alliucn_matched %>% 
+  filter(!(is.na(cat_change_bi)),
+         scientificName %in% statchangespp,
+         threat == "threat_overexploitation") %>% 
+  mutate(matched_ru = factor(matched_ru)) %>% 
+  group_by(className, matched_ru, .drop = FALSE) %>% 
+ summarise(n_improve = length(which(cat_change_bi == 1)),
+            n_decline = length(which(cat_change_bi == 0)),
+            n = n(),
+            prop_decline = n_decline / n,
+           ratio_improve = n_improve / n_decline) %>% 
+  filter(className %in% c("amphibia","aves","magnoliopsida","mammalia","pinopsida")) %>% 
+  mutate(matched_ru = factor(matched_ru, levels = c(1,0)),
+         matched_action = "threat_overexploitation") %>% 
+  rename("value" = "matched_ru")
+
+# IS
+statchange_match_is_sum <-
+  alliucn_matched %>% 
+  filter(!(is.na(cat_change_bi)),
+         scientificName %in% statchangespp,
+         threat == "threat_inv_spp") %>% 
+  mutate(matched_is = factor(matched_is)) %>% 
+  group_by(className, matched_is, .drop = FALSE) %>% 
+ summarise(n_improve = length(which(cat_change_bi == 1)),
+            n_decline = length(which(cat_change_bi == 0)),
+            n = n(),
+            prop_decline = n_decline / n,
+           ratio_improve = n_improve / n_decline) %>% 
+  filter(className %in% c("amphibia","aves","magnoliopsida","mammalia","pinopsida")) %>% 
+  mutate(matched_is = factor(matched_is, levels = c(1,0)),
+         matched_action = "threat_inv_spp") %>% 
+  rename("value" = "matched_is")
+
+# Bind
+statchange_match_sum <- 
+  rbind(statchange_match_hc_sum, statchange_match_ru_sum, statchange_match_is_sum) %>% 
+  mutate(className = factor(className,
+                            levels = names(class_lookup),
+                            labels = class_lookup),
+         declineImprove = paste(n_decline,":",n_improve,sep = "")) %>% 
+    # Remove NA for action in place (either threat is NA or missing info like AOH)
+    filter(!(is.na(value)))
+
+EDGE_sum <-
+  alliucn %>% 
+  filter(className %in% c("amphibia", "aves", "mammalia")) %>% 
+  mutate(EDGE = case_when(is.na(EDGE.Rank) ~ FALSE,
+                          !(is.na(EDGE.Rank)) ~ TRUE)) %>% 
+  group_by(EDGE) %>% 
+  summarise(n_neglect = length(which(actions_zero_sps)),
+            n_nonNeglect = length(which(!(actions_zero_sps))),
+            n = n(),
+            prop_neglect = n_neglect / n,
+            ED = median(ED, na.rm = TRUE))
+```
+
+Rebecca A. Senior^1,2^*, Ruby Bagwyn^3^, Danyan Leng^4,5^, Alexander K. Killion^4,5^, Walter Jetz^4,5^, and David S. Wilcove^1,6^
+
+^1^Princeton School of Public and International Affairs, Princeton University, Princeton, NJ, USA.
+
+^2^Conservation Ecology Group, Department of Biosciences, Durham University, Durham DH1 3LE, UK
+
+^3^Williams College, Williamstown, MA, USA.
+
+^4^Department of Ecology & Evolutionary Biology, Yale University, New Haven, CT, USA.
+
+^5^Center for Biodiversity and Global Change, Yale University, New Haven, CT, USA.
+
+^6^Department of Ecology and Evolutionary Biology, Princeton University, Princeton, NJ, USA.
+
+*__Corresponding author:__ rebecca.a.senior@gmail.com (R.A. Senior)
+
+\pagebreak
+\raggedright
+\setcounter{tocdepth}{2}
+\tableofcontents
+\beginsupplement
+
+\newpage
+\blandscape
+
+# Supplementary Figures
+
+(ref:cap-1) Schematic diagram of the protocol for defining conservation interventions as in place or not.
+
+```{r fig-s-1, fig.cap = "(ref:cap-1)", fig.width = 22/2.54, fig.height = 14/2.54}
+ggplot() +
+  theme_void() +
+  scale_x_continuous(expand = c(0,0)) +
+  scale_y_continuous(expand = c(0,0)) +
+  annotation_custom(
+    (readPNG(file.path("figs", "FigS1.png")) %>%
+       rasterGrob(interpolate = TRUE)),
+    xmin = -Inf, xmax = Inf,
+    ymin = -Inf, ymax = Inf)
+```
+
+\newpage
+
+(ref:cap-2) The proportion of species documented as threatened by habitat loss and occurring in PAs. Panel (a) represents the results from the main analyses (Figure 1), where the Species Protection Score [@jetz_include_2022] is used to determine whether species occur in PAs (Figure S1a).  For comparison, panel (b) uses an independent but analogous process of overlapping species' Area of Habitat with PAs, and comparing this percentage overlap against species-specific representation thresholds to determine which species occur in PAs (see Methods). The same is done in panel (c), but after first giving precedence to whether the Red List identifies the species as occurring in PAs. Different bar colours denote different Red List categories: Vulnerable (VU; yellow), Endangered (EN; orange), and Critically Endangered (CR; red). Small numbers above the bars represent the total number of species included in our analyses, by taxonomic class.
+
+```{r fig-s-2-raw-matched, fig.cap = "(ref:cap-2)", fig.width = 24/2.54, fig.height = 13/2.54}
+# SPS
+pa <-
+  ggplot(data = filter(matched_action_sum, 
+                       matched_action %in% c("matched_hc_sps"))) +
+  facet_wrap(~ threat, ncol = 1) +
+  geom_text(aes(x = className,
+                y = 1.09,
+                label = classN),
+            size = 2.2,
+            colour = "black") +
+  geom_bar(aes(x = className, 
+               y = nT / N,
+               fill = factor(iucn)),
+           stat = "identity", 
+           position = position_dodge())  +
+  ylab("Proportion of species with\nappropriate intervention (%)") +
+  myTheme() +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = 
+          element_text(colour = "black",
+                       angle = 90, 
+                       hjust = 1, vjust = 0.5),
+        legend.key.size = unit(0.4, "cm"),
+        legend.margin = margin(0,0,-0.3,0,"cm"), 
+        legend.position = "top") +
+  scale_fill_manual(labels = c("VU", 
+                               "EN", 
+                               "CR"),
+                    na.translate = FALSE,
+                    name = NULL,
+                    values = iucnPal) +
+  scale_y_continuous(limits = c(0, 1.09),
+                     breaks = seq(0, 1, 0.2),
+                     labels = seq(0, 100, 20)) +
+  scale_x_discrete(labels = class_lookup)
+
+sub_imgs <- imgs[match(tolower(unique(matched_action_sum$className)),names(imgs))]
+
+for (i in 1:length(sub_imgs)) {
+  x <- (1:length(sub_imgs))[i]
+  pa <- pa +
+    add_phylopic(img = sub_imgs[[i]], 
+                 alpha = 1, x = x, y = 1.05, ysize = 0.05)
+}
+
+# Target
+pb <-
+  ggplot(data = filter(matched_action_sum, 
+                       matched_action %in% c("matched_hc_target"))) +
+  facet_wrap(~ threat, ncol = 1) +
+  geom_text(aes(x = className,
+                y = 1.09,
+                label = classN),
+            size = 2.2,
+            colour = "black") +
+  geom_bar(aes(x = className, 
+               y = nT / N,
+               fill = factor(iucn)),
+           stat = "identity", 
+           position = position_dodge())  +
+  ylab("Proportion of species with\nappropriate intervention (%)") +
+  myTheme() +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = 
+          element_text(colour = "black",
+                       angle = 90, 
+                       hjust = 1, vjust = 0.5),
+        legend.key.size = unit(0.4, "cm"),
+        legend.margin = margin(0,0,-0.3,0,"cm"), 
+        legend.position = "top") +
+  scale_fill_manual(labels = c("VU", 
+                               "EN", 
+                               "CR"),
+                    na.translate = FALSE,
+                    name = NULL,
+                    values = iucnPal) +
+  scale_y_continuous(limits = c(0, 1.09),
+                     breaks = seq(0, 1, 0.2),
+                     labels = seq(0, 100, 20)) +
+  scale_x_discrete(labels = class_lookup)
+
+sub_imgs <- imgs[match(tolower(unique(matched_action_sum$className)),names(imgs))]
+
+for (i in 1:length(sub_imgs)) {
+  x <- (1:length(sub_imgs))[i]
+  pb <- pb +
+    add_phylopic(img = sub_imgs[[i]], 
+                 alpha = 1, x = x, y = 1.05, ysize = 0.05)
+}
+
+# Target RL
+pc <-
+  ggplot(data = filter(matched_action_sum, 
+                       matched_action %in% c("matched_hc_targetRL"))) +
+  facet_wrap(~ threat, ncol = 1) +
+  geom_text(aes(x = className,
+                y = 1.09,
+                label = classN),
+            size = 2.2,
+            colour = "black") +
+  geom_bar(aes(x = className, 
+               y = nT / N,
+               fill = factor(iucn)),
+           stat = "identity", 
+           position = position_dodge())  +
+  ylab("") +
+  myTheme() +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = 
+          element_text(colour = "black",
+                       angle = 90, 
+                       hjust = 1, vjust = 0.5),
+        legend.key.size = unit(0.4, "cm"),
+        legend.margin = margin(0,0,-0.3,0,"cm"), 
+        legend.position = "top") +
+  scale_fill_manual(labels = c("VU", 
+                               "EN", 
+                               "CR"),
+                    na.translate = FALSE,
+                    name = NULL,
+                    values = iucnPal) +
+  scale_y_continuous(limits = c(0, 1.09),
+                     breaks = seq(0, 1, 0.2),
+                     labels = seq(0, 100, 20)) +
+  scale_x_discrete(labels = class_lookup)
+
+sub_imgs <- imgs[match(tolower(unique(matched_action_sum$className)),names(imgs))]
+
+for (i in 1:length(sub_imgs)) {
+  x <- (1:length(sub_imgs))[i]
+  pc <- pc +
+    add_phylopic(img = sub_imgs[[i]], 
+                 alpha = 1, x = x, y = 1.05, ysize = 0.05)
+}
+
+plot_grid(pa,pb,pc,
+          nrow = 1, 
+          labels = c("(a)","(b)","(c)"),
+          label_size = 7)
+```
+
+(ref:cap-3) The model-predicted probability of species being documented as threatened by habitat loss and occurring in PAs. Panel (a) represents the results from the main analyses (Figure 1), where the Species Protection Score [@jetz_include_2022] is used to determine whether species occur in PAs (Figure S1a).  For comparison, panel (b) uses an independent but analogous process of overlapping species' Area of Habitat with PAs, and comparing this percentage overlap against species-specific representation thresholds to determine which species occur in PAs (see Methods). The same is done in panel (c), but after first giving precedence to whether the Red List identifies the species as occurring in PAs. Point colours denote different Red List categories: Vulnerable (VU; yellow), Endangered (EN; orange), and Critically Endangered (CR; red). Small numbers at the top of the panels denote the sample size. Points are model-predicted values with 95% confidence intervals.
+
+```{r fig-s-3-model-matched, fig.cap = "(ref:cap-3)", fig.width = 24/2.54, fig.height = 13/2.54}
+actionMatch_newdat_hc <- 
+    readRDS("models/main/newdat_match_all.Rds") %>% 
+    filter(paProp %in% c("Species target (SPS)",
+                         "Species target (w/o RL data)", 
+                         "Species target (w RL data)"))
+
+p <-
+  ggplot() +
+  geom_point(data = actionMatch_newdat_hc,
+             aes(x = className,
+                 y = 1 - matched_action,
+                 colour = factor(iucn)),
+             position = position_dodge(width = 0.7),
+             colour = "transparent") +
+  geom_rect(data = actionMatch_newdat_hc,
+            aes(xmin = classNumeric - 0.5, 
+                xmax = classNumeric + 0.5, 
+                ymin = -Inf, 
+                ymax = Inf, 
+                fill = className), 
+            alpha = 0.5) +
+  geom_text(data = actionMatch_newdat_hc,
+            aes(x = className,
+                y = 1.08,
+                 label = N),
+            size = 2.5,
+            colour = "black") +
+  geom_point(data = actionMatch_newdat_hc,
+             aes(x = className,
+                 y = 1 - matched_action,
+                 colour = factor(iucn)),
+             position = position_dodge(width = 0.7),
+             size = 1) +
+  geom_errorbar(data = actionMatch_newdat_hc,
+                aes(x = className,
+                    ymin = 1 - CI_lo,
+                    ymax = 1 - CI_hi,
+                    colour = factor(iucn)),
+                position = position_dodge(width = 0.7),
+                width = 0,
+                size = 0.5) +
+  ylab("Probability species\nlacking appropriate intervention (%)") +
+  facet_wrap(~ paProp,
+             ncol = 3) +
+  myTheme() +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = 
+            element_text(colour = "black", 
+                         # size = 8,
+                         angle = 45, 
+                         hjust = 1, 
+                         vjust = 1),
+        legend.margin = margin(0,0,-0.3,0, "cm"),
+        legend.position = "top") +
+  scale_colour_manual(labels = c("VU", "EN", "CR"),
+                      name = NULL,
+                      values = iucnPal) +
+  scale_fill_manual(guide = NULL,
+                    values = rep(c("grey90", "grey95"), 5)) +
+  scale_y_continuous(limits = c(0, 1.09),
+                     breaks = seq(0, 1, 0.2),
+                     labels = seq(0, 100, 20))
+
+sub_imgs <- imgs[match(tolower(unique(actionMatch_newdat_hc$className)),names(imgs))]
+
+for (i in 1:length(sub_imgs)) {
+  x <- (1:length(sub_imgs))[i]
+  p <- p +
+      add_phylopic(img = sub_imgs[[i]], 
+                 alpha = 1, x = x, y = 1.03, ysize = 0.05)
+}
+tag_facet(p, size = 3) + 
+    theme(strip.text = element_text(size = 8))
+```
+
+(ref:cap-4) The proportion of threatened species with no documentation of implementation of any of the six categories of conservation intervention (irrespective of threat). Panel (a) represents the results from the main analyses (Figure 1), where the Species Protection Score [@jetz_include_2022] is used to determine whether species occur in PAs (Figure S1a).  For comparison, panel (b) uses an independent but analogous process of overlapping species' Area of Habitat with PAs, and comparing this percentage overlap against species-specific representation thresholds to determine which species occur in PAs (see Methods). The same is done in panel (c), but after first giving precedence to whether the Red List identifies the species as occurring in PAs. Different bar colours denote different Red List categories: Vulnerable (yellow), Endangered (orange), and Critically Endangered (red). Small numbers above the bars represent the total number of species included in our analyses, by taxonomic class.
+
+```{r fig-s-4-raw-zero, fig.cap = "(ref:cap-4)", fig.width = 24/2.54, fig.height = 13/2.54}
+# Plot just sps prop 
+pa <-
+  ggplot(data = zero_action_sum$actions_zero_sps) +
+  geom_text(aes(x = className,
+                y = 1.09,
+                label = classN),
+            size = 2.2,
+            colour = "black") +
+  geom_bar(aes(x = className, 
+                 y = nT / N,
+                 fill = factor(iucn)), 
+            stat = "identity",
+             position = position_dodge(),
+             size = 1)  +
+  ylab("Proportion of species with\nzero interventions (%)") +
+  myTheme() +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = 
+          element_text(colour = "black",
+                       angle = 90, 
+                       hjust = 1, vjust = 0.5),
+        legend.key.size = unit(0.4, "cm"),
+        legend.margin = margin(0,0,-0.3,0,"cm"), 
+        legend.position = "top") +
+  scale_fill_manual(labels = c("VU", "EN", "CR"),
+                      name = NULL,
+                      values = iucnPal) +
+  scale_y_continuous(limits = c(0, 1.09),
+                     breaks = seq(0, 1, 0.2),
+                     labels = seq(0, 100, 20))
+
+sub_imgs <- imgs[match(tolower(unique(zero_action_sum$actions_zero_sps$className)),names(imgs))]
+
+for (i in 1:length(sub_imgs)) {
+  x <- (1:length(sub_imgs))[i]
+  pa <- pa +
+    add_phylopic(img = sub_imgs[[i]], 
+                 alpha = 1, x = x, y = 1.05, ysize = 0.05)
+}
+
+# Plot just target prop 
+pb <-
+  ggplot(data = zero_action_sum$actions_zero_target) +
+  geom_text(aes(x = className,
+                y = 1.09,
+                label = classN),
+            size = 2.2,
+            colour = "black") +
+  geom_bar(aes(x = className, 
+                 y = nT / N,
+                 fill = factor(iucn)), 
+            stat = "identity",
+             position = position_dodge(),
+             size = 1)  +
+  ylab("Proportion of species with\nzero interventions (%)") +
+  myTheme() +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = 
+          element_text(colour = "black",
+                       angle = 90, 
+                       hjust = 1, vjust = 0.5),
+        legend.key.size = unit(0.4, "cm"),
+        legend.margin = margin(0,0,-0.3,0,"cm"), 
+        legend.position = "top") +
+  scale_fill_manual(labels = c("VU", "EN", "CR"),
+                      name = NULL,
+                      values = iucnPal) +
+  scale_y_continuous(limits = c(0, 1.09),
+                     breaks = seq(0, 1, 0.2),
+                     labels = seq(0, 100, 20))
+
+sub_imgs <- imgs[match(tolower(unique(zero_action_sum$actions_zero_target$className)),names(imgs))]
+
+for (i in 1:length(sub_imgs)) {
+  x <- (1:length(sub_imgs))[i]
+  pb <- pb +
+    add_phylopic(img = sub_imgs[[i]], 
+                 alpha = 1, x = x, y = 1.05, ysize = 0.05)
+}
+
+# Plot just target RL prop 
+pc <-
+  ggplot(data = zero_action_sum$actions_zero_targetRL) +
+  geom_text(aes(x = className,
+                y = 1.09,
+                label = classN),
+            size = 2.2,
+            colour = "black") +
+  geom_bar(aes(x = className, 
+                 y = nT / N,
+                 fill = factor(iucn)), 
+            stat = "identity",
+             position = position_dodge(),
+             size = 1)  +
+  ylab("") +
+  myTheme() +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = 
+          element_text(colour = "black",
+                       angle = 90, 
+                       hjust = 1, vjust = 0.5),
+        legend.key.size = unit(0.4, "cm"),
+        legend.margin = margin(0,0,-0.3,0,"cm"), 
+        legend.position = "top") +
+  scale_fill_manual(labels = c("VU", "EN", "CR"),
+                      name = NULL,
+                      values = iucnPal) +
+  scale_y_continuous(limits = c(0, 1.09),
+                     breaks = seq(0, 1, 0.2),
+                     labels = seq(0, 100, 20))
+
+sub_imgs <- imgs[match(tolower(unique(zero_action_sum$actions_zero_targetRL$className)),names(imgs))]
+
+for (i in 1:length(sub_imgs)) {
+  x <- (1:length(sub_imgs))[i]
+  pc <- pc +
+    add_phylopic(img = sub_imgs[[i]], 
+                 alpha = 1, x = x, y = 1.05, ysize = 0.05)
+}
+
+plot_grid(pa,pb,pc,
+          nrow = 1, 
+          labels = c("(a)","(b)","(c)"),
+          label_size = 7)
+```
+
+(ref:cap-5)  The model-predicted probability of threatened species receiving any documented conservation intervention. Panel (a) represents the results from the main analyses (Figure 1), where the Species Protection Score[@jetz_include_2022] is used to determine whether species occur in PAs (Figure S1a).  For comparison, panel (b) uses an independent but analogous process of overlapping species' Area of Habitat with PAs, and comparing this percentage overlap against species-specific representation thresholds to determine which species occur in PAs (see Methods). The same is done in panel (c), but after first giving precedence to whether the Red List identifies the species as occurring in PAs. Point colours denote different Red List categories: Vulnerable (VU; yellow), Endangered (EN; orange), and Critically Endangered (CR; red). Small numbers at the top of the panels denote the sample size. Points are model-predicted values with 95% confidence intervals.
+
+```{r fig-s-5-model-zero, fig.cap = "(ref:cap-5)", fig.width = 24/2.54, fig.height = 13/2.54}
+action_zero_newdat <- readRDS("models/main/newdat_zero_all.Rds") %>% 
+    filter(paProp %in% c("Species target (SPS)",
+                         "Species target (w/o RL data)", 
+                         "Species target (w RL data)"))
+p <-
+  ggplot() +
+  geom_point(data = action_zero_newdat,
+             aes(x = className,
+                 y = action_zero),
+             position = position_dodge(width = 0.7),
+             colour = "transparent") +
+  geom_rect(data = action_zero_newdat,
+            aes(xmin = classNumeric - 0.5, 
+                xmax = classNumeric + 0.5, 
+                ymin = -Inf, 
+                ymax = Inf, 
+                fill = className), 
+            alpha = 0.5) +
+  geom_text(data = action_zero_newdat,
+            aes(x = className,
+                y = 1.08,
+                 label = N),
+            size = 2.2,
+            colour = "black") +
+  geom_point(data = action_zero_newdat,
+             aes(x = className,
+                 y = action_zero,
+                 colour = factor(iucn)),
+             position = position_dodge(width = 0.7),
+             size = 1) +
+  geom_errorbar(data = action_zero_newdat,
+                aes(x = className,
+                    ymin = CI_lo,
+                    ymax = CI_hi,
+                    colour = factor(iucn)),
+                position = position_dodge(width = 0.7),
+                width = 0,
+                size = 0.5) +
+  ylab("Probability of zero interventions (%)") +
+    facet_wrap(~ paProp,
+               ncol = 3) +
+  myTheme() +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = 
+          element_text(colour = "black",
+                       angle = 90, 
+                       hjust = 1, vjust = 0.5),
+        legend.margin = margin(0,0,-0.3,0),
+        legend.position = "top") +
+  scale_colour_manual(labels = c("VU", "EN", "CR"),
+                      name = NULL,
+                      values = iucnPal) +
+  scale_fill_manual(guide = NULL,
+                    values = rep(c("grey90", "grey95"), 5)) +
+  scale_y_continuous(limits = c(0, 1.09),
+                     breaks = seq(0, 1, 0.2),
+                     labels = seq(0, 100, 20))
+
+sub_imgs <- imgs[match(tolower(unique(action_zero_newdat$className)),names(imgs))]
+
+for (i in 1:length(sub_imgs)) {
+  x <- (1:length(sub_imgs))[i]
+  p <- p +
+      add_phylopic(img = sub_imgs[[i]], 
+                 alpha = 1, x = x, y = 1.03, ysize = 0.05)
+}
+
+tag_facet(p, size = 3) + 
+    theme(strip.text = element_text(size = 8))
+
+```
+
+(ref:cap-6) The model-predicted probability of threatened species receiving the appropriate conservation intervention. Results are shown for the three major threats to biodiversity with a clearly matched intervention (rows). Column (a) depicts results from the main analyses. Column (b) depicts results when excluding cases where the scope or severity of the threat is unknown. Column (c) depicts results when excluding species that are listed as "Possibly Extinct". Point colours denote different Red List categories: Vulnerable (yellow), Endangered (orange), and Critically Endangered (red). Small numbers at the top of the panels denote the sample size. Points are model-predicted values with 95% confidence intervals.
+
+```{r fig-s-6, fig.cap = "(ref:cap-6)", fig.width = 24/2.54, fig.height = 13/2.54}
+
+# P6a
+actionMatch_newdat <- readRDS("models/main/newdat_match.Rds")
+
+p6a <- 
+  ggplot() +
+  facet_wrap(~ threat) +
+  geom_point(data = actionMatch_newdat,
+             aes(x = className,
+                 y = 1 - matched_action,
+                 colour = factor(iucn)),
+             position = position_dodge(width = 0.7),
+             colour = "transparent") +
+  geom_rect(data = actionMatch_newdat,
+            aes(xmin = classNumeric - 0.5, 
+                xmax = classNumeric + 0.5, 
+                ymin = -Inf, 
+                ymax = Inf, 
+                fill = className), 
+            alpha = 0.5) +
+  geom_text(data = actionMatch_newdat,
+            aes(x = className,
+                y = 1.07,
+                label = N),
+            size = 2.5,
+            colour = "black") +
+  geom_point(data = actionMatch_newdat,
+             aes(x = className,
+                 y = 1 - matched_action,
+                 colour = factor(iucn)),
+             position = position_dodge(width = 0.7),
+             size = 1) +
+  geom_errorbar(data = actionMatch_newdat,
+                aes(x = className,
+                    ymin = 1 - CI_lo,
+                    ymax = 1 - CI_hi,
+                    colour = factor(iucn)),
+                position = position_dodge(width = 0.7),
+                width = 0,
+                size = 0.5) +
+  ylab("Probability species\nlacking appropriate intervention (%)") +
+  facet_wrap(~ threat, ncol = 1) +
+  myTheme() +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = 
+          element_text(colour = "black", 
+                       size = 10, 
+                       angle = 90, 
+                       hjust = 1, vjust = 0.5),
+        legend.margin = margin(0,0,-0.3,0, "cm"),
+        legend.position = "top") +
+  scale_colour_manual(labels = c("VU", "EN", "CR"),
+                      name = NULL,
+                      values = iucnPal) +
+  scale_fill_manual(guide = NULL,
+                    values = rep(c("grey90", "grey95"), 5)) +
+  scale_y_continuous(limits = c(0, 1.09),
+                     breaks = seq(0, 1, 0.2),
+                     labels = seq(0, 100, 20))
+
+# P6b
+actionMatch_newdat_excUnknownThreat <-
+    readRDS("models/som/newdat_excUnknownThreat_match.Rds")
+ 
+p6b <- 
+    ggplot() +
+  facet_wrap(~ threat) +
+  geom_point(data = actionMatch_newdat_excUnknownThreat,
+             aes(x = className,
+                 y = 1 - matched_action,
+                 colour = factor(iucn)),
+             position = position_dodge(width = 0.7),
+             colour = "transparent") +
+  geom_rect(data = actionMatch_newdat_excUnknownThreat,
+            aes(xmin = classNumeric - 0.5, 
+                xmax = classNumeric + 0.5, 
+                ymin = -Inf, 
+                ymax = Inf, 
+                fill = className), 
+            alpha = 0.5) +
+  geom_text(data = actionMatch_newdat_excUnknownThreat,
+            aes(x = className,
+                y = 1.07,
+                 label = N),
+            size = 2.5,
+            colour = "black") +
+  geom_point(data = actionMatch_newdat_excUnknownThreat,
+             aes(x = className,
+                 y = 1 - matched_action,
+                 colour = factor(iucn)),
+             position = position_dodge(width = 0.7),
+             size = 1) +
+  geom_errorbar(data = actionMatch_newdat_excUnknownThreat,
+                aes(x = className,
+                    ymin = 1 - CI_lo,
+                    ymax = 1 - CI_hi,
+                    colour = factor(iucn)),
+                position = position_dodge(width = 0.7),
+                width = 0,
+                size = 0.5) +
+  ylab("Probability species\nlacking appropriate intervention (%)") +
+  facet_wrap(~ threat, ncol = 1) +
+  myTheme() +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = 
+          element_text(colour = "black", 
+                       size = 10, 
+                       angle = 90, 
+                       hjust = 1, vjust = 0.5),
+        legend.margin = margin(0,0,-0.3,0, "cm"),
+        legend.position = "top") +
+  scale_colour_manual(labels = c("VU", "EN", "CR"),
+                      name = NULL,
+                      values = iucnPal) +
+  scale_fill_manual(guide = NULL,
+                    values = rep(c("grey90", "grey95"), 5)) +
+  scale_y_continuous(limits = c(0, 1.09),
+                     breaks = seq(0, 1, 0.2),
+                     labels = seq(0, 100, 20))
+
+
+# P6c
+actionMatch_newdat_excPE <- readRDS("models/som/newdat_excPE_match.Rds")
+
+p6c <-
+  ggplot() +
+  facet_wrap(~ threat) +
+  geom_point(data = actionMatch_newdat_excPE,
+             aes(x = className,
+                 y = 1 - matched_action,
+                 colour = factor(iucn)),
+             position = position_dodge(width = 0.7),
+             colour = "transparent") +
+  geom_rect(data = actionMatch_newdat_excPE,
+            aes(xmin = classNumeric - 0.5, 
+                xmax = classNumeric + 0.5, 
+                ymin = -Inf, 
+                ymax = Inf, 
+                fill = className), 
+            alpha = 0.5) +
+  geom_text(data = actionMatch_newdat_excPE,
+            aes(x = className,
+                y = 1.07,
+                 label = N),
+            size = 2.5,
+            colour = "black") +
+  geom_point(data = actionMatch_newdat_excPE,
+             aes(x = className,
+                 y = 1 - matched_action,
+                 colour = factor(iucn)),
+             position = position_dodge(width = 0.7),
+             size = 1) +
+  geom_errorbar(data = actionMatch_newdat_excPE,
+                aes(x = className,
+                    ymin = 1 - CI_lo,
+                    ymax = 1 - CI_hi,
+                    colour = factor(iucn)),
+                position = position_dodge(width = 0.7),
+                width = 0,
+                size = 0.5) +
+  ylab("Probability species\nlacking appropriate intervention (%)") +
+  facet_wrap(~ threat, ncol = 1) +
+  myTheme() +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = 
+          element_text(colour = "black", 
+                       size = 10, 
+                       angle = 90, 
+                       hjust = 1, vjust = 0.5),
+        legend.margin = margin(0,0,-0.3,0, "cm"),
+        legend.position = "top") +
+  scale_colour_manual(labels = c("VU", "EN", "CR"),
+                      name = NULL,
+                      values = iucnPal) +
+  scale_fill_manual(guide = NULL,
+                    values = rep(c("grey90", "grey95"), 5)) +
+  scale_y_continuous(limits = c(0, 1.09),
+                     breaks = seq(0, 1, 0.2),
+                     labels = seq(0, 100, 20))
+
+plot_grid(p6a,p6b,p6c,
+          nrow = 1, 
+          labels = c("(a)","(b)","(c)"),
+          label_size = 7)
+```
+
+(ref:cap-7) The model-predicted probability of threatened species receiving any documented conservation intervention. Column (a) depicts results from the main analyses. Column (b) depicts results when excluding cases where the scope or severity of the threat is unknown. Column (c) depicts results when excluding species that are listed as "Possibly Extinct". Point colours denote different Red List categories: Vulnerable (yellow), Endangered (orange), and Critically Endangered (red). Small numbers at the top of the panels denote the sample size. Points are model-predicted values with 95% confidence intervals.
+
+```{r fig-s-7, fig.cap = "(ref:cap-7)", fig.width = 24/2.54, fig.height = 13/2.54}
+# p7a
+action_zero_newdat <- readRDS("models/main/newdat_zero.Rds")
+
+p7a <-
+  ggplot() +
+  geom_point(data = action_zero_newdat,
+             aes(x = className,
+                 y = action_zero),
+             position = position_dodge(width = 0.7),
+             colour = "transparent") +
+  geom_rect(data = action_zero_newdat,
+            aes(xmin = classNumeric - 0.5, 
+                xmax = classNumeric + 0.5, 
+                ymin = -Inf, 
+                ymax = Inf, 
+                fill = className), 
+            alpha = 0.5) +
+  geom_text(data = action_zero_newdat,
+            aes(x = className,
+                y = 1.09,
+                 label = N),
+            size = 2.2,
+            colour = "black") +
+  geom_point(data = action_zero_newdat,
+             aes(x = className,
+                 y = action_zero,
+                 colour = factor(iucn)),
+             position = position_dodge(width = 0.7),
+             size = 1) +
+  geom_errorbar(data = action_zero_newdat,
+                aes(x = className,
+                    ymin = CI_lo,
+                    ymax = CI_hi,
+                    colour = factor(iucn)),
+                position = position_dodge(width = 0.7),
+                width = 0,
+                size = 0.5) +
+  ylab("Probability of zero interventions (%)")  +
+  myTheme() +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = 
+          element_text(colour = "black",
+                       angle = 90, 
+                       hjust = 1, vjust = 0.5),
+        legend.margin = margin(0,0,-0.3,0),
+        legend.position = "top") +
+  scale_colour_manual(labels = c("VU", "EN", "CR"),
+                      name = NULL,
+                      values = iucnPal) +
+  scale_fill_manual(guide = NULL,
+                    values = rep(c("grey90", "grey95"), 5)) +
+  scale_y_continuous(limits = c(0, 1.09),
+                     breaks = seq(0, 1, 0.2),
+                     labels = seq(0, 100, 20))
+
+sub_imgs <- imgs[match(tolower(unique(action_zero_newdat$className)),names(imgs))]
+
+for (i in 1:length(sub_imgs)) {
+  x <- (1:length(sub_imgs))[i]
+  p7a <- p7a +
+      add_phylopic(img = sub_imgs[[i]], 
+                 alpha = 1, x = x, y = 1.05, ysize = 0.05)
+}
+
+# p7b
+action_zero_newdat_excUnknownThreat <-
+    readRDS("models/som/newdat_excUnknownThreat_zero.Rds")
+p7b <-
+    ggplot() +
+  geom_point(data = action_zero_newdat_excUnknownThreat,
+             aes(x = className,
+                 y = action_zero),
+             position = position_dodge(width = 0.7),
+             colour = "transparent") +
+  geom_rect(data = action_zero_newdat_excUnknownThreat,
+            aes(xmin = classNumeric - 0.5, 
+                xmax = classNumeric + 0.5, 
+                ymin = -Inf, 
+                ymax = Inf, 
+                fill = className), 
+            alpha = 0.5) +
+  geom_text(data = action_zero_newdat_excUnknownThreat,
+            aes(x = className,
+                y = 1.09,
+                 label = N),
+            size = 2.2,
+            colour = "black") +
+  geom_point(data = action_zero_newdat_excUnknownThreat,
+             aes(x = className,
+                 y = action_zero,
+                 colour = factor(iucn)),
+             position = position_dodge(width = 0.7),
+             size = 1) +
+  geom_errorbar(data = action_zero_newdat_excUnknownThreat,
+                aes(x = className,
+                    ymin = CI_lo,
+                    ymax = CI_hi,
+                    colour = factor(iucn)),
+                position = position_dodge(width = 0.7),
+                width = 0,
+                size = 0.5) +
+  ylab("Probability of zero interventions (%)")  +
+  myTheme() +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = 
+          element_text(colour = "black",
+                       angle = 90, 
+                       hjust = 1, vjust = 0.5),
+        legend.margin = margin(0,0,-0.3,0),
+        legend.position = "top") +
+  scale_colour_manual(labels = c("VU", "EN", "CR"),
+                      name = NULL,
+                      values = iucnPal) +
+  scale_fill_manual(guide = NULL,
+                    values = rep(c("grey90", "grey95"), 5)) +
+  scale_y_continuous(limits = c(0, 1.09),
+                     breaks = seq(0, 1, 0.2),
+                     labels = seq(0, 100, 20))
+
+sub_imgs <- imgs[match(tolower(unique(action_zero_newdat_excUnknownThreat$className)),names(imgs))]
+
+for (i in 1:length(sub_imgs)) {
+  x <- (1:length(sub_imgs))[i]
+  p7b <- p7b +
+      add_phylopic(img = sub_imgs[[i]], 
+                 alpha = 1, x = x, y = 1.05, ysize = 0.05)
+}
+
+# p7c
+action_zero_newdat_excPE <- readRDS("models/som/newdat_excPE_zero.Rds")
+
+p7c <- 
+  ggplot() +
+  geom_point(data = action_zero_newdat_excPE,
+             aes(x = className,
+                 y = action_zero),
+             position = position_dodge(width = 0.7),
+             colour = "transparent") +
+  geom_rect(data = action_zero_newdat_excPE,
+            aes(xmin = classNumeric - 0.5, 
+                xmax = classNumeric + 0.5, 
+                ymin = -Inf, 
+                ymax = Inf, 
+                fill = className), 
+            alpha = 0.5) +
+  geom_text(data = action_zero_newdat_excPE,
+            aes(x = className,
+                y = 1.09,
+                 label = N),
+            size = 2.2,
+            colour = "black") +
+  geom_point(data = action_zero_newdat_excPE,
+             aes(x = className,
+                 y = action_zero,
+                 colour = factor(iucn)),
+             position = position_dodge(width = 0.7),
+             size = 1) +
+  geom_errorbar(data = action_zero_newdat_excPE,
+                aes(x = className,
+                    ymin = CI_lo,
+                    ymax = CI_hi,
+                    colour = factor(iucn)),
+                position = position_dodge(width = 0.7),
+                width = 0,
+                size = 0.5) +
+  ylab("Probability of zero interventions (%)")  +
+  myTheme() +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = 
+          element_text(colour = "black",
+                       angle = 90, 
+                       hjust = 1, vjust = 0.5),
+        legend.margin = margin(0,0,-0.3,0),
+        legend.position = "top") +
+  scale_colour_manual(labels = c("VU", "EN", "CR"),
+                      name = NULL,
+                      values = iucnPal) +
+  scale_fill_manual(guide = NULL,
+                    values = rep(c("grey90", "grey95"), 5)) +
+  scale_y_continuous(limits = c(0, 1.09),
+                     breaks = seq(0, 1, 0.2),
+                     labels = seq(0, 100, 20))
+
+sub_imgs <- imgs[match(tolower(unique(action_zero_newdat$className)),names(imgs))]
+
+for (i in 1:length(sub_imgs)) {
+  x <- (1:length(sub_imgs))[i]
+  p7c <- p7c +
+      add_phylopic(img = sub_imgs[[i]], 
+                 alpha = 1, x = x, y = 1.05, ysize = 0.05)
+}
+
+plot_grid(p7a,p7b,p7c,
+          nrow = 1, 
+          labels = c("(a)","(b)","(c)"),
+          label_size = 7)
+```
+
+(ref:cap-8) The total number of threatened species within each country lacking the appropriate conservation intervention. Results are summarised for each taxonomic group (rows), and for each of the three major threats to biodiversity with a clearly matched intervention (columns).
+
+```{r fig-s-8-match-ctry-total, fig.cap = "(ref:cap-8)",fig.width = 24/2.54, fig.height = 16.6/2.54}
+figS8 <- readPNG(file.path("figs/maps", 
+                            "match_ctry_total_map.png")) %>%
+  rasterGrob(interpolate = TRUE)
+ggplot() +
+  theme_void() +
+  # theme(plot.margin = margin(-1,-1,-1,-1, unit = "cm")) +
+  scale_x_continuous(expand = c(0,0)) +
+  scale_y_continuous(expand = c(0,0)) +
+  annotation_custom(figS8,
+                    xmin = -Inf, xmax = Inf,
+                    ymin = -Inf, ymax = Inf)
+
+```
+
+\elandscape
+\newpage
+
+(ref:cap-9) The total number of threatened species lacking any documented conservation interventions, in each country and taxonomic group.
+
+```{r fig-s-9-zero-country-total, fig.cap = "(ref:cap-9)",fig.width = 16.6/2.54, fig.height = 24/2.54}
+figS9 <- readPNG(file.path("figs/maps", 
+                            "zero_ctry_total_map.png")) %>%
+  rasterGrob(interpolate = TRUE)
+ggplot() +
+  theme_void() +
+  # theme(plot.margin = margin(-1,-1,-1,-1, unit = "cm")) +
+  scale_x_continuous(expand = c(0,0)) +
+  scale_y_continuous(expand = c(0,0)) +
+  annotation_custom(figS9,
+                    xmin = -Inf, xmax = Inf,
+                    ymin = -Inf, ymax = Inf)
+```
+
+\newpage
+
+(ref:cap-10)  The total number of threatened species lacking any documented conservation intervention in each country, summed across the three vertebrate classes that have range data and have been comprehensively assessed: amphibians, birds and mammals (as in Figure 2 in the main text).
+
+```{r fig-s-10,fig.cap = "(ref:cap-10)", fig.width = 16.6/2.54, fig.height = 20/2.54}
+figS10 <- readPNG(file.path("figs/maps", 
+                            "match_ctry_total_map_sub_sumTaxa.png")) %>% 
+  rasterGrob(interpolate = TRUE)
+ggplot() +
+  theme_void() +
+  # theme(plot.margin = margin(-1,-1,-1,-1, unit = "cm")) +
+  scale_x_continuous(expand = c(0,0)) +
+  scale_y_continuous(expand = c(0,0)) +
+  annotation_custom(figS10,
+                    xmin = -Inf, xmax = Inf,
+                    ymin = -Inf, ymax = Inf)
+```
+
+\newpage
+
+(ref:cap-11)  The total number of threatened species lacking any documented conservation intervention in each country, summed across the three major threats to biodiversity with a clearly matched intervention. As in Figure 2 in the main text, we consider here only the three vertebrate classes that have range data and have been comprehensively assessed: amphibians, birds and mammals. Note that the same species is counted multiple times if they face more than one of the three major threats.
+
+```{r fig-s-11,fig.cap = "(ref:cap-11)", fig.width = 16.6/2.54, fig.height = 20/2.54}
+figS11 <- readPNG(file.path("figs/maps", 
+                            "match_ctry_total_map_sub_sumTaxa.png")) %>% 
+  rasterGrob(interpolate = TRUE)
+ggplot() +
+  theme_void() +
+  # theme(plot.margin = margin(-1,-1,-1,-1, unit = "cm")) +
+  scale_x_continuous(expand = c(0,0)) +
+  scale_y_continuous(expand = c(0,0)) +
+  annotation_custom(figS11,
+                    xmin = -Inf, xmax = Inf,
+                    ymin = -Inf, ymax = Inf)
+```
+
+\newpage
+
+(ref:cap-12) A breakdown of threatened endemic (i.e., found only in one country) species by: (a) the total number of threatened endemic species lacking any documented conservation interventions; (b) the total number of threatened endemic species; and (c) the proportion of threatened endemic species within a country that are lacking any documented conservation interventions.
+
+```{r fig-s-12,fig.cap = "(ref:cap-12)", fig.width = 16.6/2.54, fig.height = 20/2.54}
+figS12 <- readPNG(file.path("figs/maps", 
+                            "action_zero_country_map.png")) %>% 
+  rasterGrob(interpolate = TRUE)
+ggplot() +
+  theme_void() +
+  # theme(plot.margin = margin(-1,-1,-1,-1, unit = "cm")) +
+  scale_x_continuous(expand = c(0,0)) +
+  scale_y_continuous(expand = c(0,0)) +
+  annotation_custom(figS12,
+                    xmin = -Inf, xmax = Inf,
+                    ymin = -Inf, ymax = Inf)
+```
+
+(ref:cap-13) The number of threatened endemic (i.e., found only in one country) species per country with documented conservation interventions versus without documented interventions. Axes have been transformed to a log1p scale to aid visualisation. Point size denotes the number of observations at each location along the x and y axes. 
+
+```{r fig-s-13,fig.cap = "(ref:cap-13)", fig.width = 15/2.54, fig.height = 15/2.54}
+ggplot(endemic_country_sum, 
+       aes(x = actions_zero, y = actions_nonzero)) +
+    geom_count() +
+    myTheme() +
+    xlab("No. threatened endemics with no documented interventions") +
+    ylab("No. threatened endemics with documented interventions") +
+    scale_y_continuous(trans="log1p", breaks=seq(0,300,50)) +
+    scale_x_continuous(trans="log1p", breaks=seq(0,300,50))
+```
+
+(ref:cap-14) The model-predicted probability that endemic species in each country have no documented conservation interventions. Countries are shaded by continent (panels) to ease visual interpretation. Points are model-predicted values with 95% confidence intervals. The sample size (n) is indicated in brackets after each country label.
+
+```{r fig-s-14, fig.cap = "(ref:cap-14)", fig.width = 16.6/2.54, fig.height = 24/2.54}
+newdat_zero_country$country <- 
+  factor(newdat_zero_country$country,
+         levels = sort(unique(newdat_zero_country$country), decreasing = TRUE)) 
+
+newdat_zero_country$country <- 
+    paste(newdat_zero_country$country," (",newdat_zero_country$n,")", sep = "")
+
+ggplot(newdat_zero_country,
+       aes(x = country, y = actions_zero_sps, colour = Continent_Name)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = CI_lo,
+                    ymax = CI_hi),
+                width = 0) +
+  ylab("Probability of neglect (%)") +
+  facet_wrap(~ Continent_Name, scales = "free_y", 
+             ncol = 1, strip.position = "right") +
+  coord_flip() +
+  scale_colour_manual(name = NULL, 
+                      guide = "none",
+                      values = RColorBrewer::brewer.pal(7, "Set1")[-6]) +
+  scale_y_continuous(breaks = seq(0,1,0.2),
+                     labels = seq(0,100,20), 
+                     expand = c(0,0.005)) +
+  myTheme() +
+  theme(axis.title.y = element_blank(), panel.spacing = unit(0,"pt"))
+  
+```
+
+(ref:cap-15) A breakdown of species that changed Red List status from 2006-2020 by country, depicting: (a) the total number of threatened species in a country that were downlisted; (b) the total number of threatened species in a country that were uplisted; and (c) the difference between the number of threatened species that were downlisted and the number that were uplisted. In panel (c), negative values (yellow to red) indicate that more species were uplisted than were downlisted, while the reverse is true for positive values (green).
+
+```{r fig-s-15, fig.cap = "(ref:cap-15)", fig.width = 16.6/2.54, fig.height = 20/2.54}
+figS15 <- readPNG(file.path("figs/maps", 
+                            "statchange_country_map.png")) %>% 
+  rasterGrob(interpolate = TRUE)
+ggplot() +
+  theme_void() +
+  # theme(plot.margin = margin(-1,-1,-1,-1, unit = "cm")) +
+  scale_x_continuous(expand = c(0,0)) +
+  scale_y_continuous(expand = c(0,0)) +
+  annotation_custom(figS15,
+                    xmin = -Inf, xmax = Inf,
+                    ymin = -Inf, ymax = Inf)
+```
+
+(ref:cap-16) The model-predicted probability that threatened species have no documented conservation interventions, with increasing Evolutionary Distinctiveness. Panels separate taxonomic classes, and lines are coloured by Red List category: Vulnerable (yellow), Endangered (orange), and Critically Endangered (red). Shaded bands correspond to 95% Confidence Intervals. Evolutionary Distinctiveness is standardised within taxonomic classes to range between 0 and 1.
+
+```{r fig-s-16, fig.cap = "(ref:cap-16)", fig.width = 10/2.54, fig.height = 15/2.54}
+ggplot(all_newdat$action_zero_ED_newdat, 
+       aes(x = ED_stand, y = action_zero,
+           fill = iucn,
+           colour = iucn)) +
+  facet_wrap(~ className) +
+  geom_ribbon(aes(ymin = CI_lo, 
+                  ymax = CI_hi), 
+              alpha = 0.3,
+              colour = "transparent") +
+  geom_line() +
+  xlab("Evolutionary Distinctiveness")  +
+  ylab("Probability of neglect (%)")  +
+  myTheme() +
+  theme(axis.text.x = 
+          element_text(colour = "black",
+                       angle = 45, 
+                       hjust = 0.5, vjust = 0.5),
+        legend.margin = margin(0,0,-0.3,0),
+        legend.key.size = unit(0.4, "cm"),
+        legend.position = "top") +
+  scale_fill_manual(name = NULL,
+                    values = iucnPal,
+                    labels = c("VU", "EN", "CR")) +
+  scale_colour_manual(name = NULL,
+                      values = iucnPal,
+                      labels = c("VU", "EN", "CR")) +
+  scale_y_continuous(limits = c(0, 1),
+                     breaks = seq(0, 1, 0.2),
+                     labels = seq(0, 100, 20))
+```
+
+\pagebreak
+
+# Supplementary Tables
+
+```{r tab-s-1}
+# Function to count species in each assessed group
+comprehensive_spp <- function(i){
+  clade_level <- paste(i["clade"], "Name", sep = "")
+  clade_name <- i["scientific"]
+  # Get species in this clade
+  spp <- alliucn[alliucn[clade_level] == clade_name, "scientificName"]
+  # Return
+  return(length(spp))
+}
+
+tab_1 <- 
+  read.csv("data/assessed_final.csv", 
+           stringsAsFactors = FALSE) %>% 
+  filter(class %in% unique(alliucn$className)) %>% 
+  dplyr::select(-included)
+tab_1$count <- unlist(apply(tab_1, MARGIN = 1, comprehensive_spp))
+class <- tab_1[tab_1$clade == "class",]
+family <- tab_1[tab_1$clade == "family" &
+                  tab_1$scientific %in% unique(alliucn$familyName),]
+order <- tab_1[tab_1$clade == "order" & tab_1$scientific == "crocodylia" ,]
+tab_1 <-
+  rbind(family, class, order) %>% 
+    filter(count > 0) %>% 
+  mutate(clade = factor(clade,
+                        levels = c("class", "order", "family"))) %>% 
+  arrange(clade, class) %>% 
+  rename("Common name" = common,
+         "Scientific name" = scientific,
+         "Taxonomic level" = clade,
+         "Taxonomic class" = class,
+         "Total species" = count)
+tab_1 <- as.data.frame(apply(tab_1, MARGIN = 2, capitalise))
+
+# Format table
+kable(tab_1, "latex", booktabs = TRUE, align = "l",
+      caption = "Taxa comprehensively assessed on the IUCN Red List and included in our main analyses.") %>%
+  kable_styling(latex_options = "HOLD_position")
+
+```
+
+\newpage
+\blandscape
+
+(ref:cap-tab-2) Reclassification of IUCN threat categories into simplified categories based on the five main threats recognised by the Convention on Biological Diversity [@hirsch_global_2010].
+
+```{r tab-s-2}
+tab_2 <- read.csv("data/threat_reclass.csv", 
+                  stringsAsFactors = FALSE, encoding = "UTF-8")
+names(tab_2) <- c("IUCN classification","level", "Habitat loss (including degradation)", 
+                  "Climate change",
+                  "Pollution", "Overexploitation", "Invasive species",
+                  "Other")
+
+# Format table
+tab_2 %>%
+    dplyr::select(-level) %>% 
+    kable("latex", booktabs = TRUE, align = "lcccccc",longtable = TRUE, 
+          caption = "(ref:cap-tab-2)") %>%
+    kable_styling(latex_options = c("hold_position", "repeat_header"), 
+                  full_width = FALSE, font_size = 9) %>% 
+    column_spec(1, width = "22em") %>% 
+    column_spec(2, width = "9em") %>% 
+    column_spec(3:7, width = "8em") 
+```
+
+\newpage
+
+(ref:cap-tab-3) Conservation legislation considered when determining if a species is subject to international legislation. Compiled from multilateral agreements named in the 'Conservation Actions In Place' text downloaded from the IUCN Red List [@iucn_iucn_2020].
+
+```{r tab-s-3}
+tab_3 <- read.csv("data/legislation/international_legislation_tab.csv", 
+                  stringsAsFactors = FALSE)
+names(tab_3) <- "Legislation name"
+
+# Format table
+kable(tab_3, "latex", booktabs = TRUE, longtable = TRUE, 
+      caption = "(ref:cap-tab-3)") %>%
+  kable_styling(latex_options = c("hold_position", "repeat_header"), 
+                full_width = FALSE, font_size = 9)
+```
+
+\newpage
+
+(ref:cap-tab-4) Summary of species lacking appropriate conservation intervention, in each country and for each of the three major threats to biodiversity with a clearly matched intervention: habitat loss (a), overexploitation for international trade (b) and invasive species (c).
+
+```{r tab-s-4}
+tab5_threat_lookup <- threat_lookup
+names(tab5_threat_lookup) <- levels(alliucn_matched$threat)
+tab_4 <-
+  lapply(1:3, function(i){
+    alliucn_matched[alliucn_matched[,"threat"] == matched_threats[i] &
+                      alliucn_matched[,matched_actions[i]] == 0,] %>% 
+      dplyr::select(scientificName, className, iucn, threat, countries_MOL_all)
+  }) %>% 
+  bind_rows() %>% 
+  filter(!(is.na(countries_MOL_all))) %>% 
+  separate_rows(countries_MOL_all, sep = ";") %>% 
+  dplyr::select(countries_MOL_all, threat, className, scientificName, iucn) %>% 
+  arrange(countries_MOL_all, threat, className, -iucn, scientificName) %>% 
+  mutate(threat = factor(threat, 
+                         levels = names(tab5_threat_lookup), 
+                         labels = tab5_threat_lookup),
+         className = factor(className, 
+                            levels = names(class_lookup), 
+                            labels = class_lookup),
+         scientificName = gsub("_", " ", scientificName),
+         iucn = factor(iucn, 
+                       levels = names(iucn_lookup), 
+                       labels = c("Vulnerable", 
+                                  "Endangered", 
+                                  "Critically Endangered"))) %>% 
+  rename(Country = countries_MOL_all,
+         "Unaddressed threat" = threat,
+         "Taxonomic class" = className,
+         "Scientific name" = scientificName,
+         "Red List category" = iucn)
+
+# Format table
+kable(tab_4, "latex", booktabs = TRUE, longtable = TRUE, 
+      caption = "(ref:cap-tab-4)") %>%
+  kable_styling(latex_options = c("hold_position", "repeat_header"), 
+                full_width = FALSE, font_size = 9)
+```
+
+\newpage
+
+```{r tab-s-5}
+statchange_match_sum <-
+statchange_match_sum %>%
+    rename(n_downlist = n_improve,
+           n_uplist = n_decline,
+           n_change = n,
+           taxonomic_class = className) %>% 
+    mutate(action_present = factor(value, 
+                                   levels = c(0,1), 
+                                   labels = c(FALSE,TRUE)),
+           threat = factor(matched_action, 
+                           levels = c("threat_habitat_change", 
+                                      "threat_overexploitation",
+                                      "threat_inv_spp"),
+                           labels = c("habitat_change", 
+                                      "overexploitation",
+                                      "invasive_species")),
+           prop_uplist = round(100 * n_uplist / n_change),
+           prop_downlist = round(100 * n_downlist / n_change)) %>% 
+    dplyr::select(taxonomic_class,
+                  threat,
+                  action_present,
+                  n_change,
+                  n_uplist,
+                  n_downlist,
+                  prop_uplist,
+                  prop_downlist
+                  )
+
+# Format table
+kable(statchange_match_sum, booktabs = TRUE, format = "pipe",
+      caption = "The number of species changing Red List status from 2006-2020.")
+```
+
+\elandscape
+\newpage
+
+(ref:cap-tab-6) Results from a binomial generalized linear model (GLM) of the proportion of threatened species with the appropriate conservation intervention in place. Model structure was of the form "appropriate_intervention ~ taxonomic_class * rl_category", where 'appropriate_intervention' was a binary variable denoting whether the appropriate intervention was in place for each species, as a function of taxonomic class ('taxonomic_class') and Red List Category ('rl_category'), and their interaction. Statistics derive from Likelihood Ratio Tests (two-sided), dropping each variable in turn and comparing the reduced model to the full model. 
+
+```{r tab-s-6}
+options(scipen = 1)
+options(digits = 2)
+
+results_match_df <-
+  lapply(results_match, function(results){
+    data.frame(Threat = c(results$threat, "", ""),
+               "Term" = c("taxonomic_class:rl_category",
+                          "taxonomic_class",
+                          "rl_category"),
+               DF = c(results$results_inter$Df[2],
+                      results$results_class$Df[2],
+                      results$results_iucn$Df[2]),
+               Deviance = c(results$results_inter$Deviance[2],
+                            results$results_class$Deviance[2],
+                            results$results_iucn$Deviance[2]),
+               P = c(results$results_inter$`Pr(>Chi)`[2],
+                     results$results_class$`Pr(>Chi)`[2],
+                     results$results_iucn$`Pr(>Chi)`[2]))
+  }) %>% 
+  bind_rows() %>% 
+  mutate(Threat = as.character(factor(Threat, 
+                                      levels = names(threat_lookup_orig),
+                                      labels = threat_lookup)),
+         Deviance = prettyNum(signif(Deviance, 3)),
+         P = paste("P = ", prettyNum(P, 3), sep = ""))
+results_match_df$Threat[which(is.na(results_match_df$Threat))] <- ""
+
+# Format table
+kable(results_match_df, "latex", caption = "(ref:cap-tab-6)", 
+      booktabs = TRUE, 
+      linesep = c("", "", "\\addlinespace"))%>%
+  kable_styling(latex_options = "HOLD_position") 
+
+```
+
+(ref:cap-tab-7) Results from a binomial GLM of the proportion of threatened species with no documented conservation interventions. Model structure was of the form "no_interventions ~ taxonomic_class * rl_category", where 'no_interventions' was a binary variable denoting whether any conservation interventions were documented for each species, as a function of taxonomic class ('taxonomic_class') and Red List Category ('rl_category'), and their interaction. Statistics derive from Likelihood Ratio Tests (two-sided), dropping each variable in turn and comparing the reduced model to the full model. 
+
+```{r tab-s-7}
+results_zero_df <-
+  data.frame("Term" = c("taxonomic_class:rl_category",
+                        "taxonomic_class",
+                        "rl_category"),
+             DF = c(results_actionZero$actions_zero_sps$results_inter$Df[2],
+                    results_actionZero$actions_zero_sps$results_class$Df[2],
+                    results_actionZero$actions_zero_sps$results_iucn$Df[2]),
+             Deviance = c(results_actionZero$actions_zero_sps$results_inter$Deviance[2],
+                          results_actionZero$actions_zero_sps$results_class$Deviance[2],
+                          results_actionZero$actions_zero_sps$results_iucn$Deviance[2]),
+             P = c(results_actionZero$actions_zero_sps$results_inter$`Pr(>Chi)`[2],
+                   results_actionZero$actions_zero_sps$results_class$`Pr(>Chi)`[2],
+                   results_actionZero$actions_zero_sps$results_iucn$`Pr(>Chi)`[2])) %>% 
+  mutate(Deviance = prettyNum(signif(Deviance, 3)),
+         P = paste("P = ", prettyNum(P, 3), sep = ""))
+
+# Format table
+kable(results_zero_df, "latex", caption = "(ref:cap-tab-7)", 
+      booktabs = TRUE, 
+      linesep = c("", "", "\\addlinespace"))%>%
+  kable_styling(latex_options = "HOLD_position") 
+
+```
+
+(ref:cap-tab-8) Results from a binomial GLM of the proportion of threatened endemic species with no documented conservation interventions. Model structure was of the form "no_interventions ~ country", where 'no_interventions' was a binary variable denoting whether any conservation interventions were documented for each endemic species, as a function of the country to which it is endemic. Statistics derive from Likelihood Ratio Tests (two-sided), dropping each variable in turn and comparing the reduced model to the full model.
+
+```{r tab-s-8}
+results_zero_ctry_df <-
+  data.frame("Term" = c("country"),
+             DF = results_actionZero_country$Df[2],
+             Deviance = results_actionZero_country$Deviance[2],
+             P = results_actionZero$actions_zero_sps$results_iucn$`Pr(>Chi)`[2]) %>% 
+  mutate(Deviance = prettyNum(signif(Deviance, 3)),
+         P = paste("P = ", prettyNum(P, 3), sep = ""))
+
+# Format table
+kable(results_zero_ctry_df, "latex", caption = "(ref:cap-tab-8)", 
+      booktabs = TRUE, 
+      linesep = c("", "", "\\addlinespace"))%>%
+  kable_styling(latex_options = "HOLD_position") 
+```
+
+(ref:cap-tab-9) Results from a binomial GLM of the model-predicted probability of endemic species receiving no conservation interventions, by country. Model structure was of the form "prob_no_interventions ~ endemic_n + gdp", where 'prob_no_interventions' ranged between 0 and 1 (0 to 100% probability of endemic species receiving no conservation interventions), as a function of the total number of endemic threatened species in the country, and the country's Gross Domestic Product (GDP). Statistics derive from Likelihood Ratio Tests (two-sided), dropping each variable in turn and comparing the reduced model to the full model.
+
+```{r tab-s-9}
+results_zeroProb_ctry_df <-
+  data.frame("Term" = c("endemic_n",
+                        "gdp"),
+             DF = c(probZero_country_n$Df[2],
+                    probZero_country_gdp$Df[2]),
+             Deviance = c(probZero_country_n$Deviance[2],
+                          probZero_country_gdp$Deviance[2]),
+             P = c(probZero_country_n$`Pr(>Chi)`[2],
+                   probZero_country_gdp$`Pr(>Chi)`[2])) %>% 
+  mutate(Deviance = prettyNum(signif(Deviance, 3)),
+         P = paste("P = ", prettyNum(P, 3), sep = ""))
+
+# Format table
+kable(results_zeroProb_ctry_df, "latex", caption = "(ref:cap-tab-9)", 
+      booktabs = TRUE, 
+      linesep = c("", "", "\\addlinespace"))%>%
+  kable_styling(latex_options = "HOLD_position")
+```
+
+<!-- # Supplementary Data -->
+
+```{r}
+data1 <- 
+    alliucn %>% 
+    dplyr::select(scientificName, phylumName, className, familyName, iucn, 
+                  realms, countries_MOL_all, islandSp_95, ED, threat_habitat_change, 
+                  threat_resource_use, threat_inv_spp, threat_pollution, 
+                  threat_climate_change, threat_other, inPA_prop10, trade_ctrl, 
+                  invasive_ctrl_success, education, reintroduction, legislation, 
+                  matched_hc_sps, matched_ru, matched_is, actions_zero_sps
+) %>% 
+    rename("redList" = "iucn",
+           "threat_overexploit" = "threat_resource_use",
+           "matched_oe" = "matched_ru")
+```
+
+
+# Supplementary References

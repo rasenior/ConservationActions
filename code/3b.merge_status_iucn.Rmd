@@ -1,0 +1,1145 @@
+# Combine & organise datasets - part II
+
+## Overview
+
+This is the second part of a script to organise and summarise data in `all_other_fields.csv`, which I downloaded via the Advanced Search of the website of the IUCN Red List (https://www.iucnredlist.org/search). It adds in a variety of datasets, summarised below.
+
+### Red List data
+
+* `conservation_needed.csv`
+* `taxonomy.csv`
+* `habitats.csv`
+* `synonyms.csv`
+* `threats.csv`
+* `common_names.csv`
+* `usetrade.csv`
+* `assessed_final_2023-08-02.csv`
+    * created manually to record which families have been comprehensively assessed, based on information at https://www.iucnredlist.org/resources/spatial-data-download
+
+### Geographic data
+
+* Google Earth Engine (GEE) statistics
+    * results from code run on GEE
+    * includes statistics for species' range, Area of Habitat, island endemism and eradication of invasive species
+* `geo_info_corrected.csv`
+    * results from code run on GEE to determine which countries and zoogeographic realms each species occurs in
+* GBIF overlap
+    * point occurrence records from GBIF for species with zero AOH, available at: https://doi.org/10.15468/DL.DVP728
+
+### Trait data
+
+* birds
+    * EltonTraits 1.0, available at: https://doi.org/10.1890/13-1917.1
+    * elevation data from: https://doi.org/10.1038/nature25794
+* mammals = EltonTraits 1.0, available at: https://doi.org/10.1890/13-1917.1
+* amphibians = AmphiBIO, available at https://doi.org/10.1038/sdata.2017.123
+* reptiles = body mass was calculated from snout-vent length using data and allometric equations from: https://doi.org/10.1111/geb.12773
+* EDGE data from: https://www.edgeofexistence.org/edge-lists/
+
+### Conservation actions data
+
+* International trade control data (CITES, CMS and EU Annexes) from Species+: https://speciesplus.net/
+* `spp_sample_checked.csv`
+    * created by manually reading and classifying the 'conservationActions' text field in `assessments.csv`
+* `international_legislation.csv`
+    * a list of common pieces of international legislation, compiled from the 'conservationActions' text field in `assessments.csv` 
+* Species Protection Score (SPS) from Map of Life: https://mol.org/
+
+## Code
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Package names
+packages <- c("dplyr","tidyr","purrr")
+
+# Install packages not yet installed
+installed_packages <- packages %in% rownames(installed.packages())
+if (any(installed_packages == FALSE)) {
+    install.packages(packages[!installed_packages])
+}
+
+# Packages loading
+invisible(lapply(packages, library, character.only = TRUE))
+
+# Function to get eradication area for each invasive
+get_eradArea <- function(r){
+  if (r["invasiveSp"] %in% r["eradSpp"][[1]]) {
+    # Get index
+    erad_i <- which(r["eradSpp"][[1]] == r["invasiveSp"])
+    # Get eradication area
+    eradArea <- as.numeric(r["eradSppArea"][[1]][erad_i])
+    return(eradArea)
+  } else return(0)
+}
+
+# Function for log-linear interpolation of conservation area targets
+loglinear_interpolation <- 
+    function (x, 
+              lothresh = 10000, lotarget = 1, 
+              hithresh = 250000, hitarget = 0.15) 
+    {
+        out <- rep(NA_real_, length(x))
+        out[x <= lothresh] <- lotarget
+        out[x >= hithresh] <- hitarget
+        between.pos <- which(is.na(out))
+        out[between.pos] <- 
+            stats::approx(x = log10(c(lothresh, hithresh)), 
+                          y = c(lotarget, hitarget), 
+                          xout = log10(x[between.pos]), 
+                          method = "linear")$y
+        return(out)
+    }
+```
+
+```{r data}
+all_iucn <- readRDS("data/all_iucn_inter.Rds")
+```
+
+```{r conservation-needed}
+# conservation_needed.csv = codes for necessary conservation actions
+conservation_needed <-
+  read.csv("data/iucn_info/conservation_needed.csv", stringsAsFactors = FALSE) %>%
+  # Some non-standardised info in note column could be used to identify problematic spp
+  dplyr::select(-c(scientificName, assessmentId, note)) %>% 
+  group_by(internalTaxonId)
+
+# Summarise for each species
+conservation_needed <-
+  conservation_needed %>% 
+  summarise(conservation_need_code = paste(code, collapse = ";"),
+            conservation_need_name = paste(name, collapse = ";"))
+
+# Merge
+all_iucn <-
+  left_join(all_iucn,
+            conservation_needed,
+            by = "internalTaxonId")
+rm(conservation_needed)
+```
+
+```{r countries-realms}
+geo <- read.csv("data/country/geo_info_corrected.csv", fileEncoding = "UTF8")
+
+# Merge
+all_iucn <-
+  left_join(all_iucn,
+            geo,
+            by = c("scientificName" = "species")) %>% 
+  dplyr::select(-realm)
+rm(geo)
+```
+
+```{r taxonomy}
+taxonomy <- 
+    read.csv("data/iucn_info/taxonomy.csv", stringsAsFactors = FALSE) %>% 
+    select(-c("genusName", "speciesName", "scientificName",
+              "infraType", "infraName", "infraAuthority",
+              "subpopulationName", "authority", "taxonomicNotes"))
+
+# Change to lower case
+taxonomy[, c("kingdomName", "phylumName", "orderName", "className", "familyName")] <-
+    apply(taxonomy[, c("kingdomName", "phylumName", "orderName", "className", "familyName")],
+          MARGIN = 2, tolower)
+
+# Merge with status change data
+all_iucn <- 
+    left_join(x = all_iucn, 
+              y = taxonomy, 
+              by = "internalTaxonId")
+
+# Groups comprehensively assessed
+comprehensive <- read.csv("data/assessed_final.csv", 
+                          stringsAsFactors = FALSE)
+
+# Function to get species corresponding to comprehensively assessed group
+comprehensive_spp <- function(i){
+  clade_level <- paste(i["clade"], "Name", sep = "")
+  clade_name <- i["scientific"]
+  # Get species in this clade
+  spp <- all_iucn[all_iucn[,clade_level] == clade_name, "scientificName"]
+  # Return
+  return(spp)
+}
+
+# Filter to groups that have been comprehensively assessed
+compspp <- unlist(apply(comprehensive, MARGIN = 1, comprehensive_spp))
+all_iucn <- filter(all_iucn, scientificName %in% compspp)
+
+rm(taxonomy, comprehensive)
+```
+
+The step below only needs running if the dataset includes birds. It uses an additional data source to fill in gaps for missing elevation preferences, but the additional dataset is for birds only.
+
+```{r elevation, eval = FALSE}
+# Download HERE: https://static-content.springer.com/esm/art%3A10.1038%2Fnature25794/MediaObjects/41586_2018_BFnature25794_MOESM3_ESM.xlsx
+# Save the first sheet as a CSV
+elev <-
+  read.csv("data/41586_2018_BFnature25794_MOESM3_ESM.csv", 
+           stringsAsFactors = FALSE) %>% 
+  rename(scientificName = "Species")
+
+# Get min & max for each species
+elev <-
+  elev %>% 
+  group_by(scientificName) %>% 
+  summarise(ElevationLower.limit = min(Minimum.elevation, na.rm = TRUE),
+            ElevationUpper.limit = max(Maximum.elevation, na.rm = TRUE)) %>% 
+  as.data.frame(.)
+
+# Get indices of species in elev df also in main df
+inds <- na.omit(match(elev$scientificName, all_iucn$scientificName))
+
+# From these indices, identify species missing lower elevation limit
+lower_inds <- inds[which(is.na(all_iucn[inds, "ElevationLower.limit"]))]
+all_iucn_missing <- all_iucn[lower_inds,]
+all_iucn <- all_iucn[-lower_inds,]
+
+# Update lower elevation limit
+all_iucn_missing$ElevationLower.limit <- 
+  as.numeric(elev[match(all_iucn_missing$scientificName, elev$scientificName), 
+       "ElevationLower.limit"])
+
+# Rebind
+all_iucn <- rbind(all_iucn, all_iucn_missing)
+
+# Repeat for upper
+inds <- na.omit(match(elev$scientificName, all_iucn$scientificName))
+upper_inds <- inds[which(is.na(all_iucn[inds, "ElevationUpper.limit"]))]
+all_iucn_missing <- all_iucn[upper_inds,]
+all_iucn <- all_iucn[-upper_inds,]
+
+# Update upper elevation limit
+all_iucn_missing$ElevationUpper.limit <- 
+  as.numeric(elev[match(all_iucn_missing$scientificName, elev$scientificName), 
+       "ElevationUpper.limit"])
+
+# Rebind
+all_iucn <- rbind(all_iucn, all_iucn_missing)
+
+# Remove stuff
+rm(all_iucn_missing, elev, inds, lower_inds, upper_inds)
+```
+
+```{r habitats}
+# habitats.csv
+habitats <-
+    read.csv("data/iucn_info/habitats.csv", stringsAsFactors = FALSE) %>%
+    dplyr::select(-c(assessmentId)) %>%
+    group_by(internalTaxonId)
+
+# Get IUCN habitat code levels 2 & 3
+habitatCodes <- strsplit(as.character(habitats$code), "[.]")
+habitats$code_l1 <- unlist(lapply(habitatCodes, function(x) as.numeric(x[1])))
+habitats$code_l2 <- unlist(lapply(habitatCodes, function(x) as.numeric(x[2])))
+habitats$code_l2[is.na(habitats$code_l2)] <- 0
+habitats$code_l3 <- unlist(lapply(habitatCodes, function(x) as.numeric(x[3])))
+
+# Create level 2 look-up for each level 1
+code_l2_lookup <-
+  group_by(habitats, code_l1) %>% 
+  summarise(code_l2 = unique(code_l2)) %>% 
+  arrange(code_l1, code_l2)
+getL2 <- function(l1) {
+  if(l1 %in% code_l2_lookup$code_l1){
+    results <- paste(code_l2_lookup$code_l2[code_l2_lookup$code_l1 == l1], 
+               collapse = ";")
+  }else{
+    results <- "0"
+  }
+  return(results)
+}
+
+# Get all the records with a zero level 2 where other levels are possible
+habitats <-
+  group_by(habitats, internalTaxonId, code_l1) %>% 
+  summarise(specialism = 
+              case_when(
+                # If L1 is rocky area, introduced veg, other or unknown cannot determine specialism
+                code_l1  %in% c(6, 16, 17, 18) ~ "unknown",
+                # If L2 contains zero, generalist
+                any(code_l2 == 0) ~ "generalist",
+                # Otherwise, specialist
+                TRUE ~ "specialist"
+                          ),
+            code_l2 = paste(code_l2, collapse = ";"),
+            majorImportance = paste(majorImportance, collapse = ";"),
+            season = paste(season, collapse = ";"),
+            suitability = paste(suitability, collapse = ";")) 
+
+# Non-generalists (specialists & unknown)
+other <- 
+  habitats %>% 
+  filter(specialism != "generalist") %>% 
+  # One row per habitat code
+  separate_rows(code_l2, majorImportance, season, suitability,
+                sep = ";", convert = TRUE) %>% 
+  # Unique species and level 1 values
+  mutate(id = paste(internalTaxonId, code_l1, code_l2, sep = "_")) %>% 
+  distinct(id, .keep_all = TRUE) %>% 
+  dplyr::select(-id)
+
+# Generalists
+generalists <- 
+  habitats %>% 
+  filter(specialism == "generalist") %>% 
+  # One row per habitat code
+  separate_rows(
+    code_l2, majorImportance, season, suitability, 
+    sep = ";", convert = TRUE) %>% 
+  # Remove non-zero level 2 values
+  filter(code_l2 == 0)
+
+if(nrow(generalists) != 0){
+    # Assign all corresponding level 2 values 
+    generalists$code_l2 <- sapply(generalists$code_l1, function(i) getL2(i))
+    generalists <-
+        generalists %>% 
+        # One row per code
+        separate_rows(code_l2, sep = ";", convert = TRUE) %>% 
+        # Unique species and level 1 values
+        mutate(id = paste(internalTaxonId, code_l1, code_l2, sep = "_")) %>% 
+        distinct(id, .keep_all = TRUE) %>% 
+        dplyr::select(-id)
+    # Combine
+    habitats <- 
+        rbind(generalists, other) %>% 
+        # Add Jung et al. code
+        mutate(jung = as.numeric(paste(code_l1, "0", code_l2, sep = "")),
+               code = 
+                   case_when(code_l2 != 0 ~ paste(code_l1, code_l2, sep = "."),
+                             code_l2 == 0 ~ as.character(code_l1))
+        )
+    rm(generalists, other)
+} else {
+    habitats <- other %>% 
+        # Add Jung et al. code
+        mutate(jung = as.numeric(paste(code_l1, "0", code_l2, sep = "")),
+               code = 
+                   case_when(code_l2 != 0 ~ paste(code_l1, code_l2, sep = "."),
+                             code_l2 == 0 ~ as.character(code_l1)))
+}
+
+# Replace missing values with unknown
+habitats$season[habitats$season == ""] <- "unknown"
+
+# IUCN habitat code -> generalized LUH2
+iucn_luh2 <- 
+    read.csv("data/lc_crosswalks/IUCN_LUH2.csv", stringsAsFactors = FALSE) %>% 
+    dplyr::select(iucn_code, luh2_general)
+
+# Join with other IUCN info
+habitats <- 
+  left_join(habitats, iucn_luh2, by = c("code" = "iucn_code"))
+
+# Repeat for CCI codes
+cci <- read.csv("data/lc_crosswalks/IUCN_CCI.csv", stringsAsFactors = FALSE)
+
+# Function to retrieve CCI codes
+getCCI <- function(habitat){
+    if(is.na(habitat)) return(NA)
+    # Index of column that corresponds to this IUCN habitat code
+    col_i <- which(gsub(".*_", "",names(cci)) == habitat)
+    # LC codes that match this habitat code
+    lc_codes <- cci[which(cci[,col_i]), "code"]
+    # Return
+    return(paste(lc_codes, collapse = ";"))
+}
+
+# Apply to every habitat pref of every species
+habitats$cci <- pbapply::pbsapply(habitats$code, getCCI)
+
+# Summarise for each species
+habitats <-
+    habitats %>% 
+    summarise(habitat_code = paste(code, collapse = ";"),
+              jung_code = paste(jung, collapse = ";"),
+              luh2_code = paste(luh2_general, collapse = ";"),
+              cci_code = paste(cci, collapse = ";"),
+              habitat_season = tolower(paste(season, collapse = ";")),
+              habitat_importance = tolower(paste(majorImportance, collapse = ";")),
+              habitat_suitability = tolower(paste(suitability, collapse = ";")))
+
+# Merge
+all_iucn <-
+    left_join(all_iucn,
+              habitats,
+              by = "internalTaxonId")
+rm(habitats)
+```
+
+```{r synonyms}
+# synonyms.csv = help to match species across datasets
+synonyms <-
+  read.csv("data/iucn_info/synonyms.csv", stringsAsFactors = FALSE) %>% 
+  mutate(genusName = trimws(genusName),
+         speciesName = trimws(speciesName),
+         synonym = paste(genusName, speciesName, sep = " ")) %>% 
+  dplyr::select(-c(scientificName, 
+                   name, genusName, speciesName, speciesAuthor, 
+                   infraType, infrarankAuthor)) %>%
+  group_by(internalTaxonId)
+
+# Summarise for each species
+synonyms <-
+  synonyms %>% 
+  summarise(synonym = paste(synonym, collapse = ";"))
+
+# Merge
+all_iucn <-
+  left_join(all_iucn,
+            synonyms,
+            by = "internalTaxonId")
+
+# Paste accepted name onto synonyms
+all_iucn$synonym <- paste(all_iucn$scientificName, all_iucn$synonym, sep = ";")
+# Remove NAs
+all_iucn$synonym <- gsub(";NA", "", all_iucn$synonym)
+
+rm(synonyms)
+```
+
+```{r threats}
+# threats.csv = coded threats, plus their timing & severity
+threats <-
+  read.csv("data/iucn_info/threats.csv", stringsAsFactors = FALSE) %>% 
+  dplyr::select(-c(scientificName, assessmentId,ancestry,
+                   internationalTrade, text)) %>% 
+  group_by(internalTaxonId)
+
+# Get named invasive species
+invasives <- threats %>% 
+  filter(grepl("8.1", code) & 
+           ias != "" & 
+           !(grepl("unspecified", tolower(ias)))) %>% 
+  # Get rid of any weird stuff stuck on the end
+  mutate(invasiveSp = gsub("_.*", "", ias)) %>% 
+  select(internalTaxonId, invasiveSp)
+invasiveSp <- unique(invasives$invasiveSp)
+
+# Get common name for invasive species
+common_names <- 
+  read.csv("data/iucn_info/common_names.csv", 
+           stringsAsFactors = FALSE, 
+           encoding = "UTF-8") %>% 
+  filter(scientificName %in% invasiveSp)
+
+# List of scientific names and common names
+invasiveSp <- c(invasiveSp, common_names$name)
+
+# Write
+write.csv(invasiveSp, "data/invasiveSp.csv",
+          row.names = FALSE, fileEncoding = "UTF-8")
+
+# Summarise for each species
+invasives <-
+  invasives %>% 
+  summarise(invasiveSp = paste(invasiveSp, collapse = ";"))
+
+# Replace missing values with unknown
+threats$scope[threats$scope == ""] <- "Unknown"
+threats$severity[threats$severity == ""] <- "Unknown"
+threats$timing[threats$timing == ""] <- "Unknown"
+threats$virus[threats$virus == ""] <- "Unknown"
+
+# What are the unique stress codes?
+unique(unlist(strsplit(threats$stressCode, "[|]")))
+test <- separate(data = threats, col = stressCode, into = letters[1:26], sep = "[|]")
+
+# Ecosystem/community stresses = "1", "1.1", "1.2", "1.3"
+# => contains a 1 not preceded by "."
+
+# Species stresses = "2", "2.1", "2.2", "2.3", "2.3.1","2.3.2","2.3.3","2.3.4",
+#                    "2.3.5","2.3.6","2.3.7","2.3.8"
+# => contains a 2 not preceded by "."
+
+threats <-
+  threats %>% 
+  mutate(
+    # Does the threat cause ecosystem/community stress?
+    stress_eco = 
+      case_when(grepl("\\w*(?<![.])1", stressCode, perl = TRUE) ~ TRUE,
+                     TRUE ~ FALSE),
+    # Does the threat cause species stress?
+    stress_sp = 
+      case_when(grepl("\\w*(?<![.])2", stressCode, perl = TRUE) ~ TRUE,
+                     TRUE ~ FALSE),
+    scope_score = 
+           case_when(scope == "Whole (>90%)" ~ 3,
+                     scope == "Majority (50-90%)" ~ 2,
+                     scope == "Minority (<50%)" ~ 1,
+                     TRUE ~ 0),
+         severity_score = 
+           case_when(severity == "Very Rapid Declines" ~ 3,
+                     severity == "Rapid Declines" ~ 2,
+                     (severity == "Slow, Significant Declines") | 
+                       (severity == "Causing/Could cause fluctuations") ~ 1,
+                     (severity == "Negligible declines") | 
+                       (severity == "No decline") ~ 0,
+                     TRUE ~ 0),
+         timing_score = 
+           case_when(timing == "Ongoing" ~ 3,
+                     timing == "Future" ~ 1,
+                     TRUE ~ 0),
+         # IUCN impact score
+         impact_iucn = scope_score + severity_score + timing_score,
+         impact_iucn_cat = 
+           case_when(impact_iucn >= 8 ~ 'high',
+                     (impact_iucn < 8) &  (impact_iucn >= 6) ~ 'medium',
+                     (impact_iucn < 6) &  (impact_iucn >= 3) ~ 'low',
+                     impact_iucn == 2 ~ 'negligible'),
+         is = scope_score + severity_score,
+         impact_cat = 
+           case_when(is >= 5 ~ 'high',
+                     (is < 5) &  (impact_iucn >= 3) ~ 'medium',
+                     (is < 3) &  (impact_iucn >= 1) ~ 'low')) %>% 
+  # Summarise for each species
+  summarise(threat_code = paste(code, collapse = ";"),
+            threat = paste(name, collapse = ";"),
+            threat_stress_eco = paste(stress_eco, collapse = ";"),
+            threat_stress_sp = paste(stress_sp, collapse = ";"),
+            threat_scope = paste(scope, collapse = ";"),
+            threat_severity = paste(severity, collapse = ";"),
+            threat_timing = paste(timing, collapse = ";"),
+            threat_virus = paste(virus, collapse = ";"),
+            threat_impact_iucn = paste(impact_iucn_cat, collapse = ";"),
+            threat_impact = paste(impact_cat, collapse = ";"))
+
+# Merge threats & invasiveSp
+threats <- left_join(threats, invasives, by = "internalTaxonId")
+
+# Merge
+all_iucn <-
+  left_join(all_iucn,
+            threats,
+            by = "internalTaxonId")
+rm(threats, invasives)
+```
+
+```{r trade}
+# usetrade.csv = if species is traded and how
+trade <-
+  read.csv("data/iucn_info/usetrade.csv", stringsAsFactors = FALSE) %>% 
+  dplyr::select(-c(assessmentId, other)) %>%
+  group_by(internalTaxonId, scientificName)
+
+# Replace missing values with unknown
+trade$international[trade$international == ""] <- "unknown"
+trade$national[trade$national == ""] <- "unknown"
+trade$subsistence[trade$subsistence == ""] <- "unknown"
+
+# Summarise for each species
+trade <-
+  trade %>% 
+  summarise(trade_code = paste(code, collapse = ";"),
+            trade = paste(name, collapse = ";"),
+            trade_international = paste(international, collapse = ";"),
+            trade_national = paste(national, collapse = ";"),
+            trade_subsistence = paste(subsistence, collapse = ";")) %>% 
+  dplyr::select(-scientificName)
+
+# Merge
+all_iucn <-
+  left_join(all_iucn,
+            trade,
+            by = "internalTaxonId") %>% 
+  # Replace any remaining blank values with NA
+  mutate(across(everything(), ~ifelse(.=="", NA, as.character(.))))
+
+rm(trade)
+```
+
+```{r cites-cms-eulisting}
+# Download data HERE: https://speciesplus.net/species#/
+cites <- 
+  read.csv("data/legislation/cites_listings_2024-03-02_comma_separated.csv", stringsAsFactors = FALSE) %>% 
+  mutate(species = paste(Genus, Species, sep = " ")) %>% 
+  .[,"species"] %>%
+  unique(.)
+cms <- 
+  read.csv("data/legislation/cms_listings_2024-03-02_comma_separated.csv", stringsAsFactors = FALSE) %>% 
+  .[,"ScientificName"] %>%
+  unique(.)
+eulist <- 
+  read.csv("data/legislation/eu_listings_2024-03-02_comma_separated.csv", stringsAsFactors = FALSE) %>% 
+  mutate(species = paste(Genus, Species, sep = " ")) %>% 
+  .[,"species"] %>%
+  unique(.)
+
+# Separate synonyms
+synonyms <- strsplit(all_iucn[, "synonym"],  ";")
+
+# Check if any of the synonyms appear in listings
+cites_check <- unlist(lapply(synonyms, function(i) any(i %in% cites)))
+cms_check <- unlist(lapply(synonyms, function(i) any(i %in% cms)))
+eulist_check <- unlist(lapply(synonyms, function(i) any(i %in% eulist)))
+
+# Add to df
+all_iucn$cites <- cites_check
+all_iucn$cms <- cms_check
+all_iucn$eulist <- eulist_check
+rm(cites, cites_check, cms, cms_check, eulist, eulist_check)
+```
+
+```{r legislation}
+# Check if other legislation is mentioned in conservation actions
+legis <- tolower(read.csv("data/legislation/international_legislation.csv")[,1])
+actions <- tolower(all_iucn$conservationActions)
+
+legis_check <-
+  # Loop over actions
+  sapply(actions, function(action){
+    # Check if any piece of international legislation is mentioned
+    any(sapply(legis, function(legislation) grepl(legislation, action)))
+  })
+
+all_iucn$legislationIntStr <- legis_check
+```
+
+```{r EDGE}
+# Download data HERE: https://www.edgeofexistence.org/edge-lists/
+ED <- 
+  lapply(c("amphibia", "aves", "mammalia", "reptilia", "gymnospermae"),
+         function(x){
+           read.csv(file.path("data/EDGE", paste("ED_", x, ".csv", sep = ""))) %>% 
+             dplyr::select("Species", "ED")
+         }) %>% 
+    discard(~nrow(.x) == 0) %>% 
+  bind_rows()
+EDGE <- 
+  lapply(c("amphibia", "aves", "mammalia", "reptilia", "gymnospermae"),
+         function(x){
+           read.csv(file.path("data/EDGE", paste("EDGE_", x, ".csv", sep = ""))) %>% 
+             dplyr::select("Species", "EDGE", "EDGE.Rank", "Median.ED")
+         }) %>% 
+    discard(~nrow(.x) == 0) %>% 
+  bind_rows()
+  
+# Merge
+all_iucn <-
+  left_join(all_iucn,
+            ED,
+            by = c("scientificName" = "Species")) %>% 
+  left_join(EDGE,
+            by = c("scientificName" = "Species"))
+rm(ED, EDGE)
+```
+
+The step below only needs running if you want to check occurrence data for species with zero Area of Habitat (AOH)
+
+```{r GBIF-aoh-check, eval = FALSE}
+# # Package names
+# packages <- c("rgbif","taxize","sf")
+# 
+# # Install packages not yet installed
+# installed_packages <- packages %in% rownames(installed.packages())
+# if (any(installed_packages == FALSE)) {
+#     install.packages(packages[!installed_packages])
+# }
+# 
+# # Packages loading
+# invisible(lapply(packages, library, character.only = TRUE))
+# 
+# # gbif.org credentials 
+# # (loads objects: gbifuser,gbifpwd,gbifemail)
+# source("code/gbif_credentials.R")
+# 
+# # Read in AOH stats from GEE
+# aohstats <- 
+#   lapply(list.files("data/GEE/aohStats_jung2015_all", 
+#                     pattern = "aohStats", full.names = TRUE), 
+#          read.csv) %>% 
+#   bind_rows()
+# 
+# # Which species have zero AOH?
+# missingaoh <- unique(gsub("_", " ", aohstats$species[aohstats$areaAOH == 0]))
+# 
+# # match the names 
+# gbif_taxon_keys <- 
+#     missingaoh %>%
+#     taxize::get_gbifid_(method="backbone") %>% # match names to the GBIF backbone to get taxonkeys
+#     imap(~ .x %>% mutate(original_sciname = .y)) %>% # add original name back into data.frame
+#     bind_rows() %>% # combine all data.frames into one
+#     filter(matchtype == "EXACT" & status == "ACCEPTED") %>% # get only accepted and matched names
+#     filter(class %in% c("Amphibia", "Aves", "Magnoliopsida", "Mammalia", "Reptilia")) %>% 
+#     pull(usagekey) # get the gbif taxonkeys
+# 
+# # use matched gbif_taxon_keys from above 
+# occ_download(
+#     pred_in("taxonKey", gbif_taxon_keys),
+#     pred_in("basisOfRecord", c('HUMAN_OBSERVATION','OBSERVATION','MACHINE_OBSERVATION')),
+#     pred("hasCoordinate", TRUE),
+#     pred("hasGeospatialIssue", FALSE),
+#     pred_gte("year", 2015),
+#     format = "SIMPLE_CSV",
+#     user=gbifuser,pwd=gbifpwd,email=gbifemail
+# )
+
+# The data are available to download at: https://doi.org/10.15468/DL.DVP728
+
+# Read in
+occdat <- 
+    read.csv("data/gbif/raw_download.csv") %>% 
+    # Filter to points with coordinate uncertainty < 300 m
+    filter(coordinateUncertaintyInMeters <= 300) %>% 
+    # Convert to spatial points
+    sf::st_as_sf(coords = c("decimalLongitude","decimalLatitude"))
+
+st_write(occdat, "data/gbif/zero_aoh_occ.shp", append = FALSE)
+```
+
+```{r GEE-stats}
+# Read in range stats from GEE
+rangestats <- 
+  lapply(list.files("data/GEE/rangeStats_jung2015_all", 
+                    pattern = "rangeStats", full.names = TRUE), 
+         read.csv) %>% 
+  bind_rows() %>% 
+  dplyr::select(islandArea, 
+                rangeAreaExt, rangeArExtPA,
+                eooArea, eooArPA,
+                spReintro, species) %>% 
+  rename("rangeArExt" = "rangeAreaExt",
+         "rangeArTot" = "eooArea",
+         "rangeArTotPA" = "eooArPA")
+# Convert areas from m^2 to km^2
+rangestats[,c("islandArea", "rangeArExt", "rangeArExtPA", "rangeArTot", "rangeArTotPA")] <-
+    rangestats[,c("islandArea", "rangeArExt", "rangeArExtPA", "rangeArTot", "rangeArTotPA")] / (1000^2)
+
+# Read in AOH stats from GEE
+aohstats <- 
+    lapply(list.files("data/GEE/aohStats_jung2015_all", 
+                      pattern = "aohStats", full.names = TRUE), 
+           read.csv) %>% 
+    bind_rows() %>% 
+    dplyr::select(areaAOH, areaAOHinPA, species) %>% 
+    mutate(areaAOH = na_if(areaAOH, 0)) %>% 
+    mutate(
+        # Convert AOH from m^2 to km^2
+        areaAOH = areaAOH / (1000^2),
+        areaAOHinPA = areaAOHinPA / (1000^2),
+        # Calculate species-specific area target
+        targetPA_prop = loglinear_interpolation(areaAOH), # proportion
+        targetPA_area = areaAOH * targetPA_prop # area
+        )
+
+# Read in eradication stats from GEE
+eradstats <- 
+  lapply(list.files("data/GEE/eradInfo_jung2015_all", 
+                    pattern = "eradInfo", full.names = TRUE), 
+         read.csv) %>% 
+  bind_rows() %>% 
+  dplyr::select(eradArea, eradStatus, invSp, species) %>% 
+    mutate(
+        # Convert area from m^2 to km^2
+        eradArea = eradArea / (1000^2))
+eradstats$eradStatus[eradstats$eradStatus =="Successful (Reinvaded)"] <- "Reinvaded"
+
+# Merge GEE data
+geestats <- 
+  merge(merge(rangestats, aohstats, by = "species", all = TRUE), 
+        eradstats, by = "species", all = TRUE) %>% 
+  rename(scientificName = species) %>% 
+  mutate(
+      # Identify island species (95% range on islands)
+    islandSp_95 = case_when(islandArea / rangeArTot >= 0.95 ~ TRUE, 
+                            TRUE ~ FALSE)) %>% 
+  group_by(scientificName) %>% 
+  summarise(islandArea, rangeArExt, rangeArExtPA, rangeArTot, rangeArTotPA, spReintro, 
+            areaAOH,  areaAOHinPA,targetPA_prop,targetPA_area,
+            eradStatus,islandSp_95,
+            # Identify species for which eradication of invasives has been attempted
+            eradAny = !(is.na(eradStatus)),
+            # Identify species for which eradication of invasives has been successful
+            eradSuccess = grepl("Successful", eradStatus)) %>% 
+  # Drop duplicates
+  distinct(scientificName, .keep_all = TRUE)
+
+# Join range stats
+all_iucn <- left_join(all_iucn, geestats, by = "scientificName")
+
+# Also add in species with zero AOH, checked by uploading GBIF records to GEE
+# and overlapping with WDPA boundaries
+aohmissing <- 
+  read.csv("data/gbif/zero_aoh_occ.csv") %>% 
+  filter(occPA > 0) %>% 
+  .[,"species"]
+
+all_iucn$GBIF_check <- NA
+all_iucn$GBIF_check[all_iucn$scientificName %in% aohmissing] <- TRUE
+
+rm(geestats, rangestats, aohstats, eradstats, aohmissing)
+```
+
+The step below requires the various datasets indicated, which I do not include and therefore this code chunk is not evaluated. Use the next code chunk for the demo instead.
+
+```{r traits, eval = FALSE}
+# Birds - data at https://doi.org/10.1890/13-1917.1
+tobias_traits <-
+  read.csv("data/traits/tobias_et_al_2019/traits.csv", 
+           stringsAsFactors = FALSE, na.strings = "") %>% 
+  rename(scientificName = "Species") %>% 
+  mutate(scientificName = gsub("_", " ", scientificName),
+         BodyMass = exp(LogBodyMass)) %>% 
+  dplyr::select(scientificName, BodyMass, IslandDwelling)
+
+# Mammals - data at https://doi.org/10.1890/13-1917.1
+elton_traits <-
+  read.csv("data/traits/elton_traits/MamFuncDat.csv", 
+           stringsAsFactors = FALSE) %>% 
+  rename(scientificName = Scientific) %>% 
+  mutate(BodyMass = BodyMass.Value,
+         IslandDwelling = NA) %>% 
+  dplyr::select(names(tobias_traits))
+
+# Amphibians - data at https://doi.org/10.1038/sdata.2017.123
+amphibio_traits <-
+  read.csv("data/traits/AmphiBIO_v1/AmphiBIO_v1.csv", 
+           stringsAsFactors = FALSE) %>% 
+  rename(scientificName = Species) %>% 
+  mutate(BodyMass = Body_mass_g,
+         IslandDwelling = NA) %>% 
+  dplyr::select(names(tobias_traits))
+
+# Reptiles - data at https://doi.org/10.1111/geb.12773
+meiri_traits <-
+  read.csv("data/traits/meiri_2018/geb12773-sup-0001-appendixs1.csv", 
+           stringsAsFactors = FALSE) %>% 
+  rename(scientificName = Binomial) %>% 
+  mutate(female.SVL = as.numeric(paste(female.SVL)),
+         LogBodyMass = intercept + (slope * log10(female.SVL)),
+         BodyMass = 10 ^ LogBodyMass,
+         IslandDwelling = NA) %>% 
+  dplyr::select(names(tobias_traits))
+  
+# Merge
+traits <- rbind(tobias_traits, elton_traits, amphibio_traits, meiri_traits)
+all_iucn <- left_join(all_iucn, traits, by = "scientificName") 
+rm(tobias_traits, elton_traits, traits)
+```
+
+```{r traits-demo-version}
+# Mammals - data at https://doi.org/10.1890/13-1917.1
+elton_traits <-
+  read.csv("data/traits/MamFuncDat.csv", 
+           stringsAsFactors = FALSE) %>% 
+  rename(scientificName = Scientific) %>% 
+  mutate(BodyMass = BodyMass.Value,
+         IslandDwelling = NA) %>% 
+  dplyr::select(scientificName, BodyMass, IslandDwelling)
+  
+# Merge
+all_iucn <- left_join(all_iucn, elton_traits, by = "scientificName") 
+rm(elton_traits)
+```
+
+```{r check-duplicates}
+unique(all_iucn$scientificName[duplicated(all_iucn$internalTaxonId)])
+```
+
+```{r SPS}
+# Species Protection Score (SPS) from Map of Life: https://mol.org/
+
+# Add SPS from MOL
+sps <- 
+    read.csv("data/SPS/sps_simplified.csv") %>%
+    # Replace blank Mode values with NA
+    mutate(across(Mode, ~ifelse(.=="", "unknown", as.character(.)))) %>% 
+    spread(key = Mode, value = Global_SPS_fill2021) %>% 
+    rename(sps_expert = Expert,
+           sps_refine = Refine) %>% 
+    # Calculate mean SPS across expert SPS and AOH(HSR)-refined SPS
+    mutate(sps_combi = rowMeans(select(., c(sps_expert, sps_refine)), na.rm = TRUE))
+
+# Manually fix Raorchestes sanctisilvaticus
+sps <- sps[-which(sps$RebeccaSpeciesName == "Raorchestes sanctisilvaticus")[2],]
+sps$sps_refine[which(sps$RebeccaSpeciesName == "Raorchestes sanctisilvaticus")] <- 0
+
+# View(sps[is.na(sps$Expert) & is.na(sps$Refine),])
+
+# Merge
+all_iucn <-
+  left_join(all_iucn,
+            sps,
+            by = c("scientificName" = "RebeccaSpeciesName"))
+
+rm(sps)
+```
+
+```{r country-MOL}
+# Countries listed in GADM
+countries <- readRDS("data/country/country_codes.Rds")
+
+# Add countries from MOL
+countries_MOL <- 
+    read.csv("data/SPS/sps_simplified_wcountries.csv") %>%
+    select(RebeccaSpeciesName, Mode, CountryName) %>% 
+    # Replace blank Mode values with NA
+    mutate(CountryName = na_if(CountryName, "")) %>% 
+    mutate(CountryName = na_if(CountryName, "None")) %>% 
+    na.omit() 
+
+# Check that all countries are listed in GADM
+all(countries_MOL$CountryName %in% countries$NAME_0)
+
+# Summarise all countries that either refine or expert deem species to occur in
+countries_MOL_all <-
+    countries_MOL %>% 
+    group_by(RebeccaSpeciesName) %>% 
+    distinct(CountryName) %>% 
+    summarise(countries_MOL_all = paste(CountryName, collapse = ", ")) %>% 
+    mutate(countries_MOL_all = paste("[",countries_MOL_all,"]", sep = ""))
+
+# Summarise by refine and expert separately
+countries_MOL <-
+    countries_MOL %>% 
+    group_by(RebeccaSpeciesName, Mode) %>% 
+    summarise(countries_MOL = paste(CountryName, collapse = ", ")) %>% 
+    mutate(countries_MOL = paste("[",countries_MOL,"]", sep = "")) %>% 
+    spread(key = Mode, value = countries_MOL) %>%
+    rename(countries_MOL_expert = Expert,
+           countries_MOL_refine = Refine)
+
+# Join
+countries_MOL <- left_join(countries_MOL, countries_MOL_all)
+
+# Merge
+all_iucn <-
+  left_join(all_iucn,
+            countries_MOL,
+            by = c("scientificName" = "RebeccaSpeciesName"))
+
+rm(countries,countries_MOL, countries_MOL_all)
+```
+
+
+```{r manual}
+manual <- 
+  read.csv("data/manual_check.csv") %>% 
+  dplyr::select(internalTaxonId, inPA, invasive_ctrl,
+                reintroduction, exsitu, education, legislation_type) %>% 
+  # Define legislation as being in place if international
+  mutate(legislation = 
+           case_when(legislation_type == "international" ~ TRUE,
+                     TRUE ~ FALSE),
+         internalTaxonId = as.character(internalTaxonId)) %>% 
+  dplyr::select(-legislation_type) %>% 
+  distinct(internalTaxonId, .keep_all = TRUE)
+names(manual)[2:7] <- paste(names(manual)[2:7], "_manual", sep = "")
+
+# Join and redefine conservation actions
+all_iucn <-
+  all_iucn %>% 
+  # Rename conservation actions
+  rename(inPA_tabular = InPlaceLandWaterProtectionInPA.value,
+         invasive_ctrl_tabular = InPlaceLandWaterProtectionInvasiveControl.value,
+         education_tabular = InPlaceEducationSubjectToPrograms.value,
+         legislation_tabular = InPlaceEducationInternationalLegislation.value,
+         trade_ctrl_tabular = InPlaceEducationControlled.value,
+         exsitu_tabular = InPlaceSpeciesManagementExSitu.value) %>% 
+  # Merge with manual info
+  left_join(manual, by = "internalTaxonId") %>% 
+  # Redefine conservation actions
+  mutate(
+      # Proportion of AOH in PAs
+      aohPA_prop = areaAOHinPA / areaAOH,
+      # Proportion of total range area in PAs
+      rangePA_prop = rangeArTotPA / rangeArTot,
+      # Various PA thresholds: 1, 5, 10, 50, 90, 95, 99%
+      PAprop_1 = case_when(aohPA_prop >= 0.01 ~ TRUE,
+                           TRUE ~ FALSE),
+      PAprop_5 = case_when(aohPA_prop >= 0.05 ~ TRUE,
+                           TRUE ~ FALSE),
+      PAprop_10 = case_when(aohPA_prop >= 0.1 ~ TRUE,
+                            TRUE ~ FALSE),
+      PAprop_25 = case_when(aohPA_prop >= 0.25 ~ TRUE,
+                            TRUE ~ FALSE),
+      PAprop_50 = case_when(aohPA_prop >= 0.5 ~ TRUE,
+                            TRUE ~ FALSE),
+      PAprop_75 = case_when(aohPA_prop >= 0.75 ~ TRUE,
+                            TRUE ~ FALSE),
+      PAprop_90 = case_when(aohPA_prop >= 0.90 ~ TRUE,
+                            TRUE ~ FALSE),
+      PAprop_95 = case_when(aohPA_prop >= 0.95 ~ TRUE,
+                            TRUE ~ FALSE),
+      PAprop_99 = case_when(aohPA_prop >= 0.99 ~ TRUE,
+                            TRUE ~ FALSE),
+      # CR AOO threshold = 10 km2
+      PAarea_10 = case_when(areaAOHinPA >= 10 ~ TRUE,
+                            TRUE ~ FALSE),
+      # EN AOO threshold = 500 km2
+      PAarea_500 = case_when(areaAOHinPA >= 500 ~ TRUE,
+                             TRUE ~ FALSE),
+      # VU AOO threshold = 2000 km2
+      PAarea_2000 = case_when(areaAOHinPA >= 2000 ~ TRUE,
+                              TRUE ~ FALSE),
+      # Does area of AOH in PAs meet target?
+      inPA_target = 
+          case_when(areaAOHinPA >= targetPA_area ~ TRUE,
+                    TRUE ~ FALSE),
+      # If sps_refine is 100, MOL has determined from refined Habitat Suitable Range (HSR = AOH)
+      # that 100% progress has been made to reaching representation threshold within PAs
+      inPA_refineSPS = case_when(sps_refine == 100 ~ TRUE, TRUE ~ FALSE), 
+      # If sps_expert is 100, MOL has determined from expert maps that 100% progress 
+      # has been made to reaching representation threshold within PAs
+      inPA_expertSPS = case_when(sps_expert == 100 ~ TRUE, TRUE ~ FALSE), 
+      # If sps_combi is 100, MOL has determined from both refined Habitat Suitable Range (HSR = AOH)
+      # and expert maps that 100% progress has been made to reaching representation threshold within PAs
+      inPA_combiSPS = case_when(sps_combi == 100 ~ TRUE, TRUE ~ FALSE), 
+      # If sps_refine OR sps_expert is 100, MOL has determined from either refined Habitat Suitable Range (HSR = AOH)
+      # OR expert maps that 100% progress has been made to reaching representation threshold within PAs
+      inPA_SPS = case_when(sps_refine == 100 | sps_expert == 100 ~ TRUE, TRUE ~ FALSE), 
+      # If IUCN state in PA, manual states in PA, GBIF states in PA, or PA prop > target
+      inPA_targetRL = 
+          case_when(inPA_tabular == "Yes" | inPA_manual | GBIF_check | inPA_target ~ TRUE,
+                    TRUE ~ FALSE), 
+      # If IUCN state in PA, manual states in PA, GBIF states in PA, or PA prop > 1/5/10/50%
+      inPA_prop1 = 
+          case_when(inPA_tabular == "Yes" | inPA_manual | GBIF_check | PAprop_1 ~ TRUE,
+                    TRUE ~ FALSE), 
+      inPA_prop5 = 
+          case_when(inPA_tabular == "Yes" | inPA_manual | GBIF_check | PAprop_5 ~ TRUE,
+                    TRUE ~ FALSE), 
+      inPA_prop10 = 
+          case_when(inPA_tabular == "Yes" | inPA_manual | GBIF_check | PAprop_10 ~ TRUE,
+                    TRUE ~ FALSE),
+      inPA_prop25 = 
+          case_when(inPA_tabular == "Yes" | inPA_manual | GBIF_check | PAprop_25 ~ TRUE,
+                    TRUE ~ FALSE),
+      inPA_prop50 = 
+          case_when(inPA_tabular == "Yes" | inPA_manual | GBIF_check | PAprop_50 ~ TRUE,
+                    TRUE ~ FALSE), 
+      inPA_prop75 = 
+          case_when(inPA_tabular == "Yes" | inPA_manual | GBIF_check | PAprop_75 ~ TRUE,
+                    TRUE ~ FALSE), 
+      inPA_prop90 = 
+          case_when(inPA_tabular == "Yes" | inPA_manual | GBIF_check | PAprop_90 ~ TRUE,
+                    TRUE ~ FALSE), 
+      inPA_prop95 = 
+          case_when(inPA_tabular == "Yes" | inPA_manual | GBIF_check | PAprop_95 ~ TRUE,
+                    TRUE ~ FALSE), 
+      inPA_prop99 = 
+          case_when(inPA_tabular == "Yes" | inPA_manual | GBIF_check | PAprop_99 ~ TRUE,
+                    TRUE ~ FALSE), 
+      # If IUCN state in PA, manual states in PA, GBIF states in PA, or PA area > 10/50/2000 km2
+      inPA_area10 = 
+          case_when(inPA_tabular == "Yes" | inPA_manual | GBIF_check | PAarea_10 ~ TRUE,
+                    TRUE ~ FALSE), 
+      inPA_area500 = 
+          case_when(inPA_tabular == "Yes" | inPA_manual | GBIF_check | PAarea_500 ~ TRUE,
+                    TRUE ~ FALSE), 
+      inPA_area2000 = 
+          case_when(inPA_tabular == "Yes" | inPA_manual | GBIF_check | PAarea_2000 ~ TRUE,
+                    TRUE ~ FALSE),
+      # If IUCN state in inv ctrl, manual states inv ctrl, or any eradication efforts
+      invasive_ctrl_any = 
+          case_when(invasive_ctrl_tabular == "Yes" | invasive_ctrl_manual | eradAny ~ TRUE,
+                    TRUE ~ FALSE),
+      # If IUCN state in inv ctrl, manual states inv ctrl, or successful eradication efforts
+      invasive_ctrl_success = 
+          case_when(invasive_ctrl_tabular == "Yes" | invasive_ctrl_manual | eradSuccess ~ TRUE,
+                    TRUE ~ FALSE),
+      # If manual states reintroduction
+      reintroduction = 
+          case_when(reintroduction_manual ~ TRUE,
+                    TRUE ~ FALSE), 
+      # If IUCN state ex situ or manual states ex situ
+      exsitu = 
+          case_when(exsitu_tabular == "Yes" | exsitu_manual ~ TRUE,
+                    TRUE ~ FALSE), 
+      # If IUCN state education or manual states education
+      education = 
+          case_when(education_tabular == "Yes" | education_manual ~ TRUE,
+                    TRUE ~ FALSE), 
+      # If IUCN state trade ctrl, or on CITES
+      trade_ctrl = 
+          case_when(trade_ctrl_tabular == "Yes" | cites  ~ TRUE, 
+                    TRUE ~ FALSE),
+      # If IUCN state legislation, there is trade control (CITES/EU), on CMS listing,
+      # other legislation mentioned in conservation actions, 
+      # or manual check indicates international legislation
+      legislation = 
+          case_when(legislation_tabular == "Yes" | cites | eulist | cms | legislationIntStr | legislation_manual ~ TRUE,
+                    TRUE ~ FALSE)
+    )
+```
+
+```{r status-change}
+status_change <-
+  readRDS("data/status_change.Rds") %>% 
+  mutate(change_year = as.numeric(year),
+         internalTaxonId = as.character(internalTaxonId)) %>% 
+  # left_join(manual, by = c("scientificName", "change_year")) %>%
+  # Remove species listed incorrectly in 2012:
+  filter(!(scientific %in% c("Eubucco versicolor", 
+                             "Pipile cumanensis",
+                             "Geotrygon saphirina",
+                             "Aphelocoma californica"))) %>% 
+  dplyr::select(-c((names(.)[grep("Name", names(.))]),
+                   scientific, common, year)) %>% 
+  rename(change_reason = reason,
+         change_ver = ver)
+```
+
+```{r merge}
+all_iucn <- 
+  left_join(all_iucn, 
+            status_change %>% 
+              # Duplicate rows are not permitted 
+              # - where species changes twice, take first instance only
+              arrange(internalTaxonId, change_year) %>% 
+              distinct(internalTaxonId, .keep_all = TRUE), 
+            by = "internalTaxonId")
+status_change <- 
+  left_join(status_change, 
+            dplyr::select(all_iucn, c("internalTaxonId", 
+                                      names(all_iucn)[which(!(names(all_iucn) %in% names(status_change)))])), 
+            by = "internalTaxonId")
+```
+
+The step below only needs running if you want to write species habitat and elevation preferences to file, to generate AOH maps.
+
+```{r habitat-prefs, eval = FALSE}
+habitat_prefs <- 
+  all_iucn %>% 
+  dplyr::select(internalTaxonId, scientificName, className, populationTrend,
+                luh2_code, cci_code, habitat_code, jung_code,
+                habitat_season, habitat_suitability, habitat_importance,
+                ElevationLower.limit, ElevationUpper.limit) %>% 
+  # Convert to long format
+  separate_rows(luh2_code, habitat_code, jung_code,
+                habitat_season, habitat_suitability, habitat_importance,
+                convert = TRUE, sep = ";") %>% 
+  # Unique land cover codes within species
+  # distinct(internalTaxonId, luh2_code, .keep_all = TRUE) %>% 
+  # Standardise categories
+  na_if("unknown") %>% 
+  na_if("") %>% 
+  na_if("seasonal occurrence unknown") %>% 
+  mutate(habitat_code = paste("habitat", habitat_code, sep = "_"),
+         habitat_season = recode(habitat_season, 
+                                 "breeding season" = "breeding",
+                                 "non-breeding season" = "non-breeding"),
+         habitat_suitability = recode(habitat_suitability, 
+                                      "suitable" = "yes")) %>% 
+  rename(elev_low = ElevationLower.limit,
+         elev_hi = ElevationUpper.limit)
+# Write to csv for upload to GEE
+write.csv(habitat_prefs, "data/habitat_prefs.csv", row.names = FALSE)
+```
+
+```{r write}
+save(all_iucn, status_change, file = "data/all_iucn_dat.Rdata")
+write.csv(all_iucn, "data/all_iucn_dat.csv", row.names = FALSE)
+saveRDS(status_change, "data/status_change_full.Rds")
+write.csv(status_change, "data/status_change.csv", row.names = FALSE)
+```
+
+
+
+
+
+
+
+
+

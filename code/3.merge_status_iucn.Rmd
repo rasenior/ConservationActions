@@ -1,0 +1,216 @@
+# Combine & organise datasets - part I
+
+This is the first part of a script to organise and summarise data in `all_other_fields.csv`, which I downloaded via the Advanced Search of the website of the IUCN Red List (https://www.iucnredlist.org/search). It adds in data from 'assessments.csv', and attempts some natural language processing and string matching to determine whether a species had been reintroduced. 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Package names
+packages <- c("reticulate","dplyr","tidyr","purrr")
+
+# Install packages not yet installed
+installed_packages <- packages %in% rownames(installed.packages())
+if (any(installed_packages == FALSE)) {
+    install.packages(packages[!installed_packages])
+}
+
+# Packages loading
+invisible(lapply(packages, library, character.only = TRUE))
+
+# # Specify path to Python installation
+# use_python(python = "/usr/local/bin/python",required = TRUE)
+
+# Function to determine if species category only based on geographic range
+b_criteria <- function(x){
+  # Test if listed according to category B
+  if (grepl("B", x)) {
+    # Test if this is the only criteria listed
+    if (length(unlist(strsplit(x, ";"))) == 1) {
+      return("TRUE")
+    } else return("FALSE")
+  } else return("FALSE")
+}
+```
+
+```{r all-other-fields}
+all_iucn <-
+  read.csv("data/iucn_info/all_other_fields.csv", stringsAsFactors = FALSE) %>% 
+  dplyr::select(-c(scientificName, assessmentId))
+```
+
+```{r assessments}
+all_iucn <-
+  left_join(all_iucn, 
+            read.csv("data/iucn_info/assessments.csv", stringsAsFactors = FALSE),
+            by = "internalTaxonId") %>% 
+  rename(habitat_text = habitat) %>% 
+  # Determine is category based only on geographic range (criteria B)
+  # (if so, can get a sense of how much habitat protection and restoration has
+  # contributed to downlisting in the past and potential for future)
+  mutate(b_criteria_only = as.logical(modify(redlistCriteria, b_criteria)))
+
+check_sentence <- function(sentence, keyword){
+  # Split into preceding part of sentence
+  sentence_split <-
+    sentence %>%
+    gsub(keyword, gsub("[*]", ";",keyword), .) %>%
+    strsplit(., ";") %>%
+    unlist(.)
+    # .[1] %>%
+    # tolower(.)
+  # Remove first word of second element
+  sentence_split2 <- unlist(strsplit(sentence_split[2], " "))
+  sentence_split2 <- 
+    paste(sentence_split2[2:length(sentence_split2)], collapse = " ")
+  # Rejoin
+  sentence <- paste(sentence_split[1], sentence_split2, sep = " ")
+  
+  # Check for tense identifiers
+  past_identifiers <- 
+    c(paste(c("was ", "has been ", "have been ", "due to ", "due to the ",
+              "of ", "of the ", "continued ", "continuing ", "further ", 
+              "efforts to "), "reintro", sep = ""),
+      paste("reintro", c(" was", " were", " has been ", " have been "), sep = ""),
+      "previous", "past")
+      
+  future_identifiers <- 
+    c(paste(c("should be ", "should only be ", "will be ", "to ", "to be ", 
+              "possibility of ", "consider ", "develop a"), "reintro", sep = ""),
+      "planned", "proposed", "future", "feasibility")
+  
+  # How many times does a past identifier appear?
+  past_count <- sum(sapply(past_identifiers, sentence, FUN = grepl))
+  # How many times does a past identifier appear?
+  future_count <- sum(sapply(future_identifiers, sentence, FUN = grepl))
+  
+  if(past_count > future_count){
+    return(TRUE)
+  }else if(future_count > past_count){
+    return(FALSE)
+  }else{
+    # If count is tied, assume no reintroduction if very few words
+    if(length(unlist(strsplit(sentence, " "))) <= 3){
+      return(FALSE)
+    }else{
+      # Otherwise, check using Python natural language
+      return("check")
+    }
+  }
+}
+
+reintro_test <- function(actions, keywords){
+  actions <- tolower(actions)
+  
+  # Remove proposed actions
+  rm_proposed <- function(string, acts){
+    if(grepl(string, acts)) acts <- unlist(strsplit(acts, string))[1]
+    return(acts)
+  }
+  
+  actions <- rm_proposed("conservation measures proposed", actions)
+  actions <- rm_proposed("conservation actions proposed", actions)
+  actions <- rm_proposed("conservation and research actions proposed", actions)
+  
+  # Standardise all possible keywords 
+  actions <- mgsub::mgsub(actions, pattern = keywords, 
+                          replacement = rep("reintro*", length(keywords)))
+  if(!(grepl("reintro*", actions))){
+    return(FALSE)}
+  else{
+    # Tidy the string
+    actions <- actions %>% 
+      # Remove html tags
+      gsub("<.*?>", " ", .) %>%
+      # Remove common abbreviations
+      gsub("e[.]g[.]", "eg", .) %>% 
+      gsub("i[.]e[.]", "ie", .) %>% 
+      # Remove full-stop before letters (i.e. not end of sentence)
+      gsub("[.] [a-z]", " ", ., ) %>% 
+      gsub("[.][a-z]", " ", ., ) %>% 
+      gsub("[.][A-Z]", " ", ., ) %>% 
+      # Remove full-stop after number
+      gsub("[1-9][.]", " ", .) %>% 
+      # Remove full-stop before comma
+      gsub("[.],", " ", .) %>%
+      # Remove full-stop before brackets
+      gsub("[.] [(]", " ", .) %>%
+      gsub("[.][)]", " ", .) %>%
+      # Remove punctuation except full-stop
+      gsub("[^[:alnum:][:space:]\\.\\,]", " ", .) %>% 
+      # Trim whitespace
+      gsub("(?<=[\\s])\\s*|^\\s+|\\s+$", "", ., perl=TRUE) %>% 
+      trimws(.)
+    
+    # Split into sentences
+    sentences <- 
+      unlist(strsplit(actions, "[.]")) %>% 
+      # Subset to those containing 'reintro'
+      .[grep("reintro*", .)] 
+    
+    # Check all sentences
+    sentence_check <- sapply(sentences, FUN = check_sentence, keyword = "reintro*")
+    
+    # If any of the sentences are NOT check, remove check
+    if(length(grep("check", sentence_check)) < length(sentence_check)){
+      sentence_check <- 
+        as.logical(sentence_check[grep("check", sentence_check, invert = TRUE)])
+    }else{
+      # Otherwise, return the string that needs checking
+      to_check <- 
+        sentences[1] %>% 
+        gsub("reintro*", gsub("[*]", ";","reintro*"), .) %>% 
+        strsplit(., ";") %>%
+        unlist(.) %>%
+        .[1] %>% 
+        tolower(.)
+      return(to_check)
+    }
+    
+    # If any of the sentences return TRUE, there was reintroduction
+    if(any(sentence_check)){
+      return(TRUE)
+    }else return(FALSE)
+  }
+}
+
+# Apply across species
+check <- sapply(all_iucn$conservationActions, 
+                FUN = reintro_test, 
+                keywords = c("island reintro*",
+                             "island transloc*",
+                             "transloc*"))
+                             # "released"))  
+# "transfer*"))
+# Identify species for which reintro info needs checking
+tocheck_i <- which(!(check %in% c("TRUE", "FALSE")))
+tocheck <- check[tocheck_i]
+```
+
+```{python determine-tense}
+import nltk
+from nltk import word_tokenize, pos_tag
+
+def determine_tense_input(sentence):
+    text = word_tokenize(sentence)
+    tagged = pos_tag(text)
+    future = len([word for word in tagged if word[1] == "MD"])
+    present = len([word for word in tagged if word[1] in ["VBP", "VBZ","VBG"]])
+    past = len([word for word in tagged if word[1] in ["VBD", "VBN"]]) 
+    # No reintro if future tense, or if no tense detected
+    if ((future > 0) or (future + present + past == 0)):
+      return False
+    else:
+      return True
+
+checked = [determine_tense_input(sentence= i) for i in r.tocheck]
+```
+
+```{r assign-reintro}
+check[tocheck_i] <- py$checked
+names(check) <- NULL
+
+# all_iucn$reintroduction_auto <- apply(check, MARGIN = 1, any)
+all_iucn$reintroduction_auto <- as.logical(check)
+rm(check, tocheck, tocheck_i)
+saveRDS(all_iucn, "data/all_iucn_inter.Rds")
+```

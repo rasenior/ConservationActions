@@ -1,0 +1,187 @@
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r packages}
+# Package names
+packages <-  c("dplyr", "tidyr","purrr","sf", "geodata")
+
+# Install packages not yet installed
+installed_packages <- packages %in% rownames(installed.packages())
+if (any(installed_packages == FALSE)) {
+    install.packages(packages[!installed_packages])
+}
+
+# Packages loading
+invisible(lapply(packages, library, character.only = TRUE))
+
+# Define function to capitalise first letter
+capitalise <- function(string) {
+  substr(string, 1, 1) <- toupper(substr(string, 1, 1))
+  string
+}
+```
+
+# Background
+
+```{r countries, eval = FALSE}
+# For this demo we will use only countries in which Gorilla gorilla occurs 
+demo_ctrs <- c("AGO","CAF","CMR","COD","COG","GAB","GNQ","NGA")
+ 
+# Download country spatial data
+gadm(country=demo_ctrs, level = 0, path="data/country")
+
+# Read in the polygons
+country_polys_files <- list.files("data/country/gadm", full.names = TRUE)
+country_polys <- lapply(country_polys_files, readRDS)
+# Merge into single spatVector
+country_polys <- 
+    do.call(rbind, country_polys) %>% 
+    st_as_sf()
+
+# Write
+saveRDS(country_polys, "data/country/countries.Rds")
+```
+
+# Setup for maps
+
+```{r data}
+# Main data
+alliucn <- readRDS("data/analysis/main/all_iucn_prepped.Rds")
+
+# Status change
+statchange <- readRDS("data/analysis/main/status_change_prepped.Rds")
+
+# Country spatial data
+country_polys <- readRDS("data/country/countries.Rds")
+```
+
+```{r lookups}
+verts <- c("amphibia", "aves", "mammalia")
+matched_threats <- c("threat_habitat_change", "threat_resource_use", "threat_inv_spp" )
+matched_actions <- c("matched_hc_sps", "matched_ru", "matched_is")
+threat_lookup <- c(
+  threat_habitat_change = "Habitat loss",
+  threat_overexploitation = "International trade",
+  threat_inv_spp = "Invasive species"
+)
+threat_lookup_labs <- paste("(", letters[1:3], ") ", threat_lookup, sep = "")
+names(threat_lookup_labs) <- threat_lookup
+class_lookup <- capitalise(sort(unique(alliucn$className)))
+names(class_lookup) <- sort(unique(alliucn$className))
+```
+
+```{r sort-data}
+# Threat presence/absence ------------------------------------------------------
+alliucn_threats <-
+  gather(alliucn, key = "threat", value = "threat_present", 
+         starts_with("threat_"), -"threat_count") %>% 
+    # Relevel
+    mutate(threat = factor(threat,
+                           levels = c("threat_habitat_change",
+                                      "threat_resource_use", 
+                                      "threat_inv_spp", 
+                                      "threat_pollution",
+                                      "threat_climate_change",
+                                      "threat_other")),
+           className =  factor(className,
+                               levels = sort(unique(className)))) %>% 
+  # Drop NAs
+  filter(!(is.na(threat_present))) %>% 
+  dplyr::select(scientificName, className, iucn, ED, EDGE.Rank,cat_change_bi,
+                threat, threat_present, threat_count, 
+                starts_with("matched_"), 
+                starts_with("action_count_"),
+                countries_MOL_all)
+
+# Matched action presence/absence -----------------------------------------------
+alliucn_matched <- 
+  alliucn_threats %>% 
+  filter(
+    # Threat is present
+    threat_present == 1,
+    # Threat is  habitat change/resource use/invasive species
+    threat %in% matched_threats
+    ) %>% 
+  # Relevel
+  mutate(threat = factor(threat,
+                         levels = c("threat_habitat_change",
+                                    "threat_resource_use",
+                                    "threat_inv_spp"),
+                         labels = c("threat_habitat_change",
+                                    "threat_overexploitation",
+                                    "threat_inv_spp")))
+```
+
+# Prep for analyses and maps
+
+```{r prep-match-df-ctry}
+actions_match_props <- names(alliucn)[grep("matched_hc_",names(alliucn))]
+matched_actions <- c("matched_hc_sps", "matched_ru", "matched_is")
+matched_threats <- 
+  c("threat_habitat_change", "threat_overexploitation", "threat_inv_spp")
+
+# NOTE
+# Can sum by species with 0 vs. 1 for matched action without considering whether
+# threat is present because value of matched action is NA when corresponding
+# threat is 0 or NA
+
+# Summarise total 'not matched' species by country
+occ_matched_ctry_total <-
+  lapply(1:3, function(i){
+    alliucn_matched[alliucn_matched[,"threat"] == matched_threats[i] &
+                      alliucn_matched[,matched_actions[i]] == 0,] %>% 
+      dplyr::select(scientificName, className, iucn, threat, countries_MOL_all)
+  }) %>% 
+  bind_rows() %>%
+  filter(!(is.na(countries_MOL_all))) %>% 
+  separate_rows(countries_MOL_all, sep = ";") %>% 
+  rename(country = countries_MOL_all) %>% 
+  # Count species in each country
+  group_by(country, threat, className) %>% 
+  summarise(n = n())
+
+# Join to spatial data
+occ_matched_ctry_total <-
+  left_join(country_polys, occ_matched_ctry_total, by = c("COUNTRY" = "country")) %>% 
+  rename("country" = "COUNTRY") %>% 
+  mutate(threat = factor(threat,
+                         levels = names(threat_lookup),
+                         labels = threat_lookup),
+         className =
+           factor(className,
+                  levels = names(class_lookup),
+                  labels = class_lookup)) %>% 
+  filter(!(is.na(threat)) & !(is.na(className)))
+
+# Write
+saveRDS(occ_matched_ctry_total, "data/country/occ_matched_ctry_total.Rds")
+```
+
+```{r prep-zero-df-ctry}
+occ_zero_ctry_total <-
+  alliucn %>%
+  filter(actions_zero_sps == 1) %>% 
+  bind_rows() %>% 
+  filter(!(is.na(countries_MOL_all))) %>% 
+  separate_rows(countries_MOL_all, sep = ";") %>% 
+  rename(country = countries_MOL_all) %>% 
+  # Count species in each realm
+  group_by(country, className) %>% 
+  summarise(n = n())
+
+# Join to spatial data
+occ_zero_ctry_total <-
+  left_join(country_polys, occ_zero_ctry_total, by = c("COUNTRY" = "country")) %>% 
+  rename("country" = "COUNTRY") %>% 
+  mutate(className =
+           factor(className,
+                  levels = names(class_lookup),
+                  labels = class_lookup),
+         dummy = "dummy") %>% 
+  filter(!(is.na(className)))
+
+# Write
+saveRDS(occ_zero_ctry_total, "data/country/occ_zero_ctry_total.Rds")
+```

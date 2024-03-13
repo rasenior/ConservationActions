@@ -1,0 +1,589 @@
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r packages}
+# Package names
+packages <-  c("dplyr", "tidyr","purrr",
+               "sf", "ggplot2","RColorBrewer","egg","cowplot","scales",
+               "DiagrammeR","DiagrammeRsvg","rsvg")
+
+# Install packages not yet installed
+installed_packages <- packages %in% rownames(installed.packages())
+if (any(installed_packages == FALSE)) {
+    install.packages(packages[!installed_packages])
+}
+
+# Packages loading
+invisible(lapply(packages, library, character.only = TRUE))
+
+goodpal <- RColorBrewer::brewer.pal(9, "YlGnBu")[3:9]
+badpal <- RColorBrewer::brewer.pal(9, "YlOrRd")[3:9]
+```
+
+```{r functions}
+# Define function to capitalise first letter
+capitalise <- function(string) {
+  substr(string, 1, 1) <- toupper(substr(string, 1, 1))
+  string
+}
+
+# A function factory for getting integer y-axis values.
+integer_breaks <- function(n = 5, ...) {
+  fxn <- function(x) {
+    breaks <- floor(pretty(x, n, ...))
+    names(breaks) <- attr(breaks, "labels")
+    breaks
+  }
+  return(fxn)
+}
+```
+
+```{r data}
+# Main data
+alliucn <- 
+    readRDS("data/analysis/main/all_iucn_prepped.Rds") %>% 
+    # Filter to Gorilla gorilla & Colobus guereza for demo
+    filter(scientificName %in% c("Gorilla_gorilla", "Colobus_guereza"))
+
+# Model data
+newdat_zero_country <- 
+    readRDS("models/main/newdat_zero_country.Rds")
+
+# Country spatial data
+country_polys <- readRDS("data/country/countries.Rds")
+
+# Get continent codes
+continent <- 
+    read.csv("data/country/continent_codes.csv") %>% 
+  dplyr::select(Continent_Name, Three_Letter_Country_Code)
+```
+
+```{r lookups}
+verts <- c("amphibia", "aves", "mammalia")
+matched_threats <- c("threat_habitat_change", "threat_resource_use", "threat_inv_spp" )
+matched_actions <- c("matched_hc_sps", "matched_ru", "matched_is")
+threat_lookup <- c(
+  threat_habitat_change = "Habitat loss",
+  threat_overexploitation = "International trade",
+  threat_inv_spp = "Invasive species"
+)
+threat_lookup_labs <- paste("(", letters[1:3], ") ", threat_lookup, sep = "")
+names(threat_lookup_labs) <- threat_lookup
+class_lookup <- capitalise(sort(unique(alliucn$className)))
+names(class_lookup) <- sort(unique(alliucn$className))
+```
+
+```{r sort-data}
+# Country endemics -------------------------------------------------------------
+endemic_country <-
+  alliucn %>% 
+  filter(
+    !(is.na(countries_MOL_all)),
+    !(grepl(";", countries_MOL_all))) %>% 
+  dplyr::select(scientificName, className, countries_MOL_all, actions_zero_sps) %>% 
+  separate_rows(countries_MOL_all, sep = ";") %>% 
+  rename(country = countries_MOL_all) %>% 
+  # Count species in each country
+  group_by(country) %>% 
+  summarise(actionZero_sum = sum(actions_zero_sps),
+            n = n(),
+            actionZero_prop = 100 * (actionZero_sum / n)) %>% 
+  left_join(dplyr::select(newdat_zero_country, - n), by = "country")
+
+# Join to spatial data
+endemic_country <-
+  left_join(country_polys, endemic_country, by = c("COUNTRY" = "country")) %>% 
+  rename("country" = "COUNTRY")
+
+# Threat presence/absence ------------------------------------------------------
+alliucn_threats <-
+  gather(alliucn, key = "threat", value = "threat_present", 
+         starts_with("threat_"), -"threat_count") %>% 
+  # Relevel
+  mutate(threat = factor(threat,
+                         levels = c("threat_habitat_change",
+                                    "threat_resource_use", 
+                                    "threat_inv_spp", 
+                                    "threat_pollution",
+                                    "threat_climate_change",
+                                    "threat_other")),
+         className =  factor(className,
+                             levels = sort(unique(className)))) %>% 
+  # Drop NAs
+  filter(!(is.na(threat_present))) %>% 
+  dplyr::select(scientificName, className, iucn, threat, threat_present, 
+                threat_count, 
+                starts_with("matched_"), 
+                starts_with("action_count_"))
+
+# Matched action presence/absence -----------------------------------------------
+alliucn_matched <- 
+  alliucn_threats %>% 
+  filter(
+    # Threat is present
+    threat_present == 1,
+    # Threat is  habitat change/resource use/invasive species
+    threat %in% matched_threats
+  ) %>% 
+  # Relevel
+  mutate(threat = factor(threat,
+                         levels = c("threat_habitat_change",
+                                    "threat_resource_use",
+                                    "threat_inv_spp"),
+                         labels = c("threat_habitat_change",
+                                    "threat_overexploitation",
+                                    "threat_inv_spp")))
+```
+
+```{r create-dirs}
+# Create output dirs to hold figures
+dir.create("figs/maps")
+```
+
+```{r statchange-countries}
+# Bind to status change
+statchange_sum <- 
+  readRDS("data/analysis/main/status_change_prepped.Rds") %>% 
+  dplyr::select(scientificName, className, countries_MOL_all, cat_change_bi) %>% 
+  separate_rows(countries_MOL_all, sep = ";") %>% 
+  rename("country" = "countries_MOL_all") %>% 
+  # Count species in each country
+  group_by(country) %>% 
+  # Count species
+  summarise(improve = sum(cat_change_bi == 1),
+            decline = sum(cat_change_bi == 0),
+            diff = improve - decline,
+            n = n())
+
+# Join to spatial data
+statchange_country <-
+  left_join(country_polys, statchange_sum, by = c("COUNTRY" = "country")) %>% 
+  rename("country" = "COUNTRY")
+```
+
+# All species
+
+```{r zero_ctry_total, eval = FALSE}
+occ_zero_ctry_total <- readRDS("data/country/occ_zero_ctry_total.Rds")
+
+# Plot --------------------------------------------------------------------
+p <-
+  ggplot() +
+  geom_sf(data = country_polys,
+          fill = "grey",
+          colour = "transparent") +
+  geom_sf(data = occ_zero_ctry_total,
+          aes(fill = n),
+          colour = "transparent") +
+  facet_grid(className ~ dummy,
+             switch = "y") +
+  theme_void() +
+  theme(legend.position = "bottom",
+        legend.title = element_text(size = 10),
+        legend.key.height = unit(0.5, "cm"),
+        legend.key.width = unit(1, "cm"),
+        legend.box = "vertical",
+        panel.background = element_rect(fill = "white",
+                                        colour = "transparent"),
+        plot.background = element_rect(fill = "white",
+                                       colour = "transparent")) +
+  scale_fill_gradientn(na.value = "transparent", 
+                       colours = badpal) +
+      guides(fill = guide_colourbar(barwidth = unit(5, "cm"),
+                                    barheight = unit(0.3, "cm"), 
+                                    title = "Total species lacking\ndocumented interventions", 
+                                    title.position = "top"))
+p <-
+  tag_facet(p, vjust = 1, hjust = 0, size = 2.5) +
+  theme(strip.text.x = element_blank(),
+        strip.text.y = element_text(size = 8, margin = margin(r = 5)))
+ggsave(plot = p, 
+       filename = "figs/maps/zero_ctry_total_map.png",
+       dpi = 100, width = 8, height = 16.6, units = "cm")
+```
+
+```{r match_ctry_total, eval = FALSE}
+occ_matched_ctry_total <- readRDS("data/country/occ_matched_ctry_total.Rds")
+
+# Plot --------------------------------------------------------------------
+p <-
+  ggplot() +
+  geom_sf(data = occ_matched_ctry_total,
+          aes(fill = n),
+          colour = "transparent") +
+  facet_grid(className ~ threat,
+             switch = "y") +
+  theme_void() +
+  theme(legend.position = "bottom",
+        legend.title = element_text(size = 6),
+        legend.text = element_text(size = 6),
+        legend.key.size = unit(0.4, "cm"),
+        legend.box = "vertical",
+        panel.background = element_rect(fill = "white",
+                                        colour = "transparent"),
+        plot.background = element_rect(fill = "white",
+                                       colour = "transparent")) +
+  scale_fill_gradientn(name = "Total species lacking\nappropriate intervention",
+                           na.value = "transparent", 
+                           colours = badpal)
+p <-
+  tag_facet(p, vjust = 1,hjust = 0, size = 1.5) +
+  theme(strip.text.x = element_text(size = 6,  margin = margin(b = 5)),
+        strip.text.y = element_text(size = 6, margin = margin(r = 5)))
+ggsave(plot = p, 
+       filename = "figs/maps/match_ctry_total_map.png",
+       dpi = 800, width = 24, height = 16.6, units = "cm")
+```
+
+```{r match_ctry_total_sub, eval = FALSE}
+taxa <- c("Amphibia", "Aves", "Mammalia")
+tags <- list(letters[1:3], letters[4:6], letters[7:9])
+
+# Just amphibians, birds & mammals
+occ_matched_ctry_total_sub <- 
+  filter(occ_matched_ctry_total, className %in% taxa)
+
+# Plot --------------------------------------------------------------------
+p <- 
+  lapply(1:length(taxa), function(i){
+    tax <- taxa[i]
+    dat <- filter(occ_matched_ctry_total_sub, className == tax)
+    minN <- min(dat$n, na.rm = TRUE)
+    maxN <- max(dat$n, na.rm = TRUE)
+    
+    tax_p <-
+      ggplot() +
+      geom_sf(data = country_polys, 
+              fill = "grey", 
+              colour = "transparent") +
+      geom_sf(data = dat,
+              aes(fill = n),
+              colour = "transparent") +
+      facet_grid(className ~ threat,
+                 switch = "y") +
+      theme_void() +
+      theme(legend.position = "right",
+            legend.text = element_text(size = 8)) +
+      scale_fill_gradientn(name = NULL,
+                           na.value = "transparent", 
+                           colours = badpal) +
+      guides(fill = guide_colourbar(barwidth = unit(0.1, "cm"),
+                                    barheight = unit(2.8, "cm")))
+    
+    # Add facet labels
+    if(tax != "Amphibia") {
+      tax_p <- 
+        tag_facet(tax_p, open = "", close = "", tag_pool = tags[[i]],
+                  vjust = 1, size = 2.5) +
+        theme(strip.text.x = element_blank(),
+              strip.text.y = element_text(size = 8, margin = margin(r = 0.1)))
+    } else {
+      tax_p <- 
+        tag_facet(tax_p, open = "", close = "", tag_pool = tags[[i]],
+                  vjust = 1, size = 2.5) +
+        theme(strip.text.x = element_text(size = 8, margin = margin(b = 0.1)),
+              strip.text.y = element_text(size = 8, margin = margin(r = 0.1)))
+    }
+    
+    return(tax_p)
+  })
+names(p) <- taxa
+
+combi <-
+  plot_grid(p$Amphibia, p$Aves, p$Mammalia,
+            ncol = 1,
+            nrow = 3, 
+            align = "hv",
+            axis = "tblr")
+
+# Save
+ggsave(plot = combi, 
+       filename = "figs/maps/match_ctry_total_map_sub.png",
+       dpi = 800, width = 24, height = 10, units = "cm")
+```
+
+```{r match_ctry_total_sub_sum, eval = FALSE}
+taxa <- c("Amphibia", "Aves", "Mammalia")
+tags <- list(letters[1:3], letters[4:6], letters[7:9])
+
+# Extract taxa of interest
+occ_matched_ctry_total_sub <- 
+  sf::st_drop_geometry(occ_matched_ctry_total) %>% 
+  # Just amphibians, birds & mammals
+  filter(className %in% taxa)
+levels(occ_matched_ctry_total_sub$threat) <- 
+  c(expression(paste(bold('a')," Habitat loss")), 
+    expression(paste(bold('b')," International trade")),
+    expression(paste(bold('c')," Invasive species")))
+occ_matched_ctry_total_sub$className <- droplevels(occ_matched_ctry_total_sub$className)
+levels(occ_matched_ctry_total_sub$className) <- 
+  c(expression(paste(bold('a')," Amphibia")), 
+    expression(paste(bold('b')," Aves")),
+    expression(paste(bold('c')," Mammalia")))
+
+# Sum across taxa by threat
+occ_matched_ctry_total_sub_sumTaxa <-
+  group_by(occ_matched_ctry_total_sub, country, threat) %>% 
+  summarise(n = sum(n, na.rm = TRUE)) %>% 
+  mutate(dummy = "dummy")
+
+# Sum across threat by taxa
+occ_matched_ctry_total_sub_sumThreat <-
+  group_by(occ_matched_ctry_total_sub, country, className) %>% 
+  summarise(n = sum(n, na.rm = TRUE)) %>% 
+  mutate(dummy = "dummy")
+
+# Rejoin to country polys
+occ_matched_ctry_total_sub_sumTaxa <-
+  left_join(country_polys, occ_matched_ctry_total_sub_sumTaxa, by = c("COUNTRY"="country")) %>%
+  filter(!(is.na(threat)))
+occ_matched_ctry_total_sub_sumThreat <-
+  left_join(country_polys, occ_matched_ctry_total_sub_sumThreat, by = c("COUNTRY"="country")) %>%
+  filter(!(is.na(className)))
+
+a <-
+  ggplot() +
+  geom_sf(data = country_polys, 
+          fill = "grey", 
+          colour = "transparent") +
+  geom_sf(data = occ_matched_ctry_total_sub_sumTaxa,
+          aes(fill = n),
+          colour = "transparent") +
+  facet_grid(threat ~ dummy,
+             switch = "y",
+             labeller = labeller(threat = label_parsed, 
+                                 dummy = "")) +
+  # facet_wrap( ~ threat, ncol = 1) +
+  theme_void() +
+  theme(legend.position = "bottom",
+        legend.title = element_text(size = 10),
+        legend.text = element_text(size = 6),
+        legend.key.size = unit(0.4, "cm"),
+        legend.key.width = unit(0.5, "cm"),
+        legend.key.height = unit(0.1, "cm"),
+        legend.box = "vertical",
+        strip.text.x = element_blank()) +
+  scale_fill_gradientn(name = "Total species lacking\nappropriate intervention",
+                       na.value = "transparent", 
+                       colours = badpal)
+ggsave(plot = a, 
+       filename = file.path("figs","maps", 
+                            "match_ctry_total_map_sub_sumTaxa.png"),
+       dpi = 800, width = 15, height = 20, units = "cm")
+
+
+b <-
+  ggplot() +
+  geom_sf(data = country_polys, 
+          fill = "grey", 
+          colour = "transparent") +
+  geom_sf(data = occ_matched_ctry_total_sub_sumThreat,
+          aes(fill = n),
+          colour = "transparent") +
+  facet_grid(className ~ dummy,
+             switch = "y",
+             labeller = labeller(className = label_parsed, 
+                                 dummy = "")) +
+  theme_void() +
+  theme(legend.position = "bottom",
+        legend.title = element_text(size = 10),
+        legend.text = element_text(size = 6),
+        legend.key.size = unit(0.4, "cm"),
+        legend.key.width = unit(0.5, "cm"),
+        legend.key.height = unit(0.1, "cm"),
+        legend.box = "vertical",
+        strip.text.x = element_blank()) +
+  scale_fill_gradientn(name = "Total species lacking\nappropriate intervention",
+                       na.value = "transparent", 
+                       colours = badpal)
+ggsave(plot = b, 
+       filename = file.path("figs", "maps",
+                            "match_ctry_total_map_sub_sumThreat.png"),
+       dpi = 800, width = 15, height = 20, units = "cm")
+```
+
+# Endemic species
+
+```{r zero_ctry_endemic, eval = FALSE}
+# Plot --------------------------------------------------------------------
+p_zeroN <-
+  ggplot() +
+  geom_sf(data = country_polys, 
+          fill = "grey", 
+          colour = "transparent") +
+  geom_sf(data = endemic_country,
+          aes(fill = actionZero_sum),
+          colour = "transparent") +
+  theme_void() +
+  theme(legend.position = "bottom",
+        legend.title = element_text(size = 10),
+        legend.key.size = unit(0.4, "cm"),
+        legend.box = "vertical") +
+  scale_fill_gradientn(name = "Neglected threatened endemics",
+                      na.value = "transparent", 
+                      colours = badpal) +
+  guides(fill = guide_colourbar(title.position = "top", 
+                                title.hjust = 0.5,
+                                barheight = unit(0.1, "cm"),
+                                barwidth = unit(6, "cm")))
+
+p_zeroTotal <-
+  ggplot() +
+  geom_sf(data = country_polys, 
+          fill = "grey", 
+          colour = "transparent") +
+  geom_sf(data = endemic_country,
+          aes(fill = n),
+          colour = "transparent") +
+  theme_void() +
+  theme(legend.position = "bottom",
+        legend.title = element_text(size = 10),
+        legend.key.size = unit(0.4, "cm"),
+        legend.box = "vertical") +
+  scale_fill_gradientn(name = "Total threatened endemics",
+                      na.value = "transparent", 
+                      colours = goodpal) +
+  guides(fill = guide_colourbar(title.position = "top",
+                                title.hjust = 0.5,
+                                barheight = unit(0.1, "cm"),
+                                barwidth = unit(6, "cm")))
+p_zeroProp <-
+  ggplot() +
+  geom_sf(data = country_polys, 
+          fill = "grey", 
+          colour = "transparent") +
+  geom_sf(data = endemic_country,
+          aes(fill = actionZero_prop),
+          colour = "transparent") +
+  theme_void() +
+  theme(legend.position = "bottom",
+        legend.title = element_text(size = 10),
+        legend.key.size = unit(0.4, "cm"),
+        legend.box = "vertical") +
+  scale_fill_gradientn(name = "Neglected threatened endemics (%)",
+                      na.value = "transparent", 
+                      colours = RColorBrewer::brewer.pal(9, "Reds")[3:9]) +
+  guides(fill = guide_colourbar(title.position = "top",
+                                title.hjust = 0.5,
+                                barheight = unit(0.1, "cm"),
+                                barwidth = unit(6, "cm")))
+
+combi <- plot_grid(p_zeroN, p_zeroTotal, p_zeroProp, ncol = 1, nrow = 3,
+                   labels = paste("(", letters[1:3], ")", sep = ""), 
+                   label_size = 7)
+
+# Save
+ggsave(plot = combi, 
+       filename = "figs/maps/action_zero_country_map.png",
+       dpi = 800, width = 12, height = 16.6, units = "cm")
+```
+
+```{r zero_ctry_endemic_prob, eval = FALSE}
+# Plot --------------------------------------------------------------------
+p_zeroProb_ctry <-
+  ggplot() +
+  geom_sf(data = country_polys, 
+          fill = "grey", 
+          colour = "transparent") +
+  geom_sf(data = endemic_country,
+          aes(fill = actionZero_prop),
+          colour = "transparent") +
+  theme_void() +
+  theme(legend.position = "bottom",
+        legend.title = element_text(size = 10),
+        legend.key.size = unit(0.4, "cm"),
+        legend.box = "vertical") +
+  scale_fill_gradientn(name = "Probability of zero actions (%)",
+                      na.value = "transparent", 
+                      colours = badpal) +
+  guides(fill = guide_colourbar(title.position = "top", 
+                                title.hjust = 0.5,
+                                barheight = unit(0.1, "cm"),
+                                barwidth = unit(6, "cm")))
+
+# Save
+ggsave(plot = p_zeroProb_ctry, 
+       filename = "figs/maps/action_zero_country_prob_map.png",
+       dpi = 800, width = 12, height = 6, units = "cm")
+```
+
+# Status changes
+
+```{r stat-change-map, eval = FALSE}
+p_improve <-
+  ggplot() +
+  geom_sf(data = country_polys, 
+          fill = "grey", 
+          colour = "transparent") +
+  geom_sf(data = statchange_country,
+          aes(fill = improve),
+          colour = "transparent") +
+  theme_void() +
+  theme(legend.position = "bottom",
+        legend.title = element_text(size = 10),
+        legend.key.size = unit(0.4, "cm"),
+        legend.box = "vertical") +
+  scale_fill_gradientn(name = "No. species downlisted",
+                      na.value = "transparent", 
+                      colours = goodpal) +
+  guides(fill = guide_colourbar(title.position = "top", 
+                                title.hjust = 0.5,
+                                barheight = unit(0.1, "cm"),
+                                barwidth = unit(6, "cm")))
+p_decline <-
+  ggplot() +
+  geom_sf(data = country_polys, 
+          fill = "grey", 
+          colour = "transparent") +
+  geom_sf(data = statchange_country,
+          aes(fill = decline),
+          colour = "transparent") +
+  theme_void() +
+  theme(legend.position = "bottom",
+        legend.title = element_text(size = 10),
+        legend.key.size = unit(0.4, "cm"),
+        legend.box = "vertical") +
+  scale_fill_gradientn(name = "No. species uplisted",
+                      na.value = "transparent", 
+                      colours = badpal) +
+  guides(fill = guide_colourbar(title.position = "top", 
+                                title.hjust = 0.5,
+                                barheight = unit(0.1, "cm"),
+                                barwidth = unit(6, "cm")))
+
+p_diff <-
+  ggplot() +
+  geom_sf(data = country_polys, 
+          fill = "grey", 
+          colour = "transparent") +
+  geom_sf(data = statchange_country,
+          aes(fill = improve - decline),
+          colour = "transparent") +
+  theme_void() +
+  theme(legend.position = "bottom",
+        legend.title = element_text(size = 10),
+        legend.key.size = unit(0.4, "cm"),
+        legend.box = "vertical") +
+  scale_fill_gradient2(name = "No. species downlisted - uplisted",
+                       na.value = "transparent", 
+                       low = RColorBrewer::brewer.pal(9, "RdYlBu")[1],
+                       mid = RColorBrewer::brewer.pal(9, "RdYlBu")[5],
+                       high = RColorBrewer::brewer.pal(9, "RdYlBu")[9], 
+                       breaks = seq(-35, 5, 5),
+                       limits = c(-35, 5)) +
+  guides(fill = guide_colourbar(title.position = "top", 
+                                title.hjust = 0.5,
+                                barheight = unit(0.1, "cm"),
+                                barwidth = unit(6, "cm")))
+
+combi <- plot_grid(p_improve,p_decline,p_diff, ncol = 1, nrow = 3,
+                   labels = paste("(", letters[1:3], ")", sep = ""), 
+                   label_size = 7)
+
+# Save
+ggsave(plot = combi, 
+       filename = "figs/maps/statchange_country_map.png",
+       dpi = 800, width = 12, height = 16.6, units = "cm")
+```
